@@ -19,7 +19,7 @@ triton @ https://github.com/intel/intel-xpu-backend-for-triton/releases/download
 #oneccl_bind_pt==2.1.100+xpu
 
 cmake>=3.21
-transformers >= 4.36.0  # Required for Gemma.
+transformers >= 4.37.0  # Required for Qwen2.
 fastapi
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
