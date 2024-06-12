@@ -84,7 +84,10 @@ class LLMEngine:
             f"enforce_eager={model_config.enforce_eager}, "
             f"kv_cache_dtype={cache_config.cache_dtype}, "
             f"device_config={device_config.device}, "
-            f"seed={model_config.seed})")
+            f"seed={model_config.seed}, "
+            f"max_num_batched_tokens={scheduler_config.max_num_batched_tokens}, "
+            f"max_num_seqs={scheduler_config.max_num_seqs}, "
+            f"max_model_len={scheduler_config.max_model_len})")
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config
