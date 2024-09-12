@@ -58,7 +58,7 @@ from vllm.multimodal.image import (cached_get_image_processor,
                                    cached_get_tokenizer)
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
-from .idefics2_vision_model import Idefics2VisionTransformer
+#from .idefics2_vision_model import Idefics2VisionTransformer
 
 logger = init_logger(__name__)
 
@@ -508,7 +508,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
                            self.vpm.embeddings.embed_dim)
         self.embed_dim = self.config.hidden_size
         self.resampler = self.init_resampler(self.embed_dim, self.vision_dim)
-        self.resampler.to(device="cuda", dtype=param_dtype)
+        #self.resampler.to(device="cuda", dtype=param_dtype)
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)
@@ -831,7 +831,8 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
                           quant_config=quant_config)
 
     def init_vision_module(self) -> nn.Module:
-        model = Idefics2VisionTransformer(self.config.vision_config)
+        #model = Idefics2VisionTransformer(self.config.vision_config)
+        model = None
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
         return model
@@ -978,9 +979,9 @@ class MiniCPMVQwen2(MiniCPMVBaseModel):
         for i in range(B):
             patch_attn_mask[i, 0, :tgt_sizes[i][0] * tgt_sizes[i][1]] = True
         vision_embedding = self.vpm(
-            all_pixel_values.type(dtype),
+            all_pixel_values.type(dtype).to(device),
             patch_attention_mask=patch_attn_mask,
-            tgt_sizes=tgt_sizes,
+            tgt_sizes=tgt_sizes.to(device),
         ).last_hidden_state
 
         return self.resampler(vision_embedding, tgt_sizes)
