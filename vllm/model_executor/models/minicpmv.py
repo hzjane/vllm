@@ -58,7 +58,7 @@ from vllm.multimodal.image import (cached_get_image_processor,
                                    cached_get_tokenizer)
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
-#from .idefics2_vision_model import Idefics2VisionTransformer
+from .idefics2_vision_model import Idefics2VisionTransformer
 
 logger = init_logger(__name__)
 
@@ -831,8 +831,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
                           quant_config=quant_config)
 
     def init_vision_module(self) -> nn.Module:
-        #model = Idefics2VisionTransformer(self.config.vision_config)
-        model = None
+        model = Idefics2VisionTransformer(self.config.vision_config)
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
         return model
@@ -884,8 +883,8 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
         for i in range(B):
             patch_attn_mask[i, :tgt_sizes[i][0] * tgt_sizes[i][1]] = True
 
-        return self.get_vision_embedding(all_pixel_values.type(dtype),
-                                         patch_attn_mask, tgt_sizes)
+        return self.get_vision_embedding(all_pixel_values.type(dtype).to(device),
+                                         patch_attn_mask, tgt_sizes.to(device))
 
     def is_default_weight_loading(self, name: str) -> bool:
         return "resampler" in name
