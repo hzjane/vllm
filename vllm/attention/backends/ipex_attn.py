@@ -364,8 +364,14 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     output[start:end, :, :] = sub_out
                     start = end
             else:
-                # TODO: add chunked prefill feature here...
-                pass
+                if self.num_kv_heads != self.num_heads:
+                    key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
+                    value = value.repeat_interleave(self.num_queries_per_kv,
+                                                    dim=1)
+                import vllm._C.ops
+                out = vllm._C.ops.context_attention_forward_v2(query, key_cache, value_cache, prefill_meta.block_tables, prefill_meta.query_start_loc, prefill_meta.seq_lens, prefill_meta.context_lens, prefill_meta.max_seqlen, torch.amax(prefill_meta.context_lens).item())
+                assert output[:num_prefill_tokens].shape == out.shape
+                output[:num_prefill_tokens] = out
 
 
         if decode_meta := attn_metadata.decode_metadata:
