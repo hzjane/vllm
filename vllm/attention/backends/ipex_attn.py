@@ -67,6 +67,8 @@ class IpexAttnMetadata(AttentionMetadata, PagedAttentionMetadata):
     seq_lens: Optional[List[int]]
     seqlen_q: Optional[torch.Tensor]
     max_seqlen: Optional[int]
+    query_start_loc: Optional[torch.Tensor]
+    context_lens: Optional[torch.Tensor]
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -264,25 +266,6 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     else:
                         att_masks = [None] * len(attn_metadata.seq_lens)
                     attn_metadata.attn_bias = att_masks
-
-                # output = torch.empty(
-                #     (num_tokens, self.num_heads, self.head_size),
-                #     dtype=query.dtype,
-                #     device=query.device)
-                # ipex_ops.varlen_attention(query,
-                #                           key,
-                #                           value,
-                #                           output,
-                #                           attn_metadata.seqlen_q,
-                #                           attn_metadata.seqlen_q,
-                #                           attn_metadata.max_seqlen,
-                #                           attn_metadata.max_seqlen,
-                #                           pdropout=0.0,
-                #                           softmax_scale=self.scale,
-                #                           zero_tensors=False,
-                #                           is_causal=True,
-                #                           return_softmax=False,
-                #                           gen_=None)
 
                 output = torch.empty(
                             (num_tokens, self.num_heads, self.head_size),
