@@ -723,7 +723,7 @@ void context_attention_kernel_v2(
           const int bsz_idx = item_ct1.get_group(0);
           const int seq_idx = item_ct1.get_group(2);
           constexpr bool USE_PARTITIONING = false;
-          const int context_len = context_lens_ptr[bsz_idx] + seq_idx;
+          int context_len = context_lens_ptr[bsz_idx] + seq_idx;
           const int seq_len = seq_lens_ptr[bsz_idx];
           uint8_t* dpct_local = dpct_local_acc_ct1.get_pointer();
           Q_Vec* q_vecs = q_vecs_acc_ct1.get_pointer();
@@ -742,6 +742,8 @@ void context_attention_kernel_v2(
           if (context_len >= seq_len) {
             return;
           }
+
+          context_len = context_len + 1;
 
           const int num_context_blocks =
               DIVIDE_ROUND_UP(context_len, BLOCK_SIZE);
