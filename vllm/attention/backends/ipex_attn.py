@@ -430,7 +430,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     exp_sums,
                     max_logits,
                     tmp_output,
-                    query,
+                    decode_query,
                     key_cache,
                     value_cache,
                     self.num_kv_heads,
