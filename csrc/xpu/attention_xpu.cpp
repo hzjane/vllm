@@ -337,7 +337,7 @@ void context_attention_kernel_v1(
           // ############################
           for (size_t group = 0; group < gid; ++group) {
             // 1. begins to load each position's key and value
-            size_t target_key_position = group * GS + tid;
+            size_t target_key_position = context_len + group * GS + tid;
             int which_block = target_key_position / block_size;
             int which_slot = target_key_position % block_size;
 
