@@ -157,7 +157,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
 
         gc.collect()
         torch.xpu.empty_cache()
-        flag = int(os.getenv("TEST_INPUT", None))
+        flag = os.getenv("TEST_INPUT", None)
         if flag is not None:
             in_len = int(self.scheduler_config.max_num_batched_tokens / 1024)
             logger.info(f"before_memory {before_memory/(1024**3)} GB")
