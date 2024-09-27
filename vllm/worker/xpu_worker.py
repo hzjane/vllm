@@ -123,6 +123,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.xpu.empty_cache()
+        before_memory = torch.xpu.memory.memory_reserved()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -153,8 +154,22 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
                              cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
+
         gc.collect()
         torch.xpu.empty_cache()
+        flag = int(os.getenv("TEST_INPUT", None))
+        if flag is not None:
+            in_len = int(self.scheduler_config.max_num_batched_tokens / 1024)
+            logger.info(f"before_memory {before_memory/(1024**3)} GB")
+            logger.info(f"total_gpu_memory = {total_gpu_memory/(1024**3)} GB")
+            logger.info(f"peak_memory {peak_memory/(1024**3)} GB")
+            add_memory = peak_memory-before_memory
+            logger.info(f"add_memory {add_memory} B")
+            total_add_memory = total_gpu_memory*self.cache_config.gpu_memory_utilization-before_memory
+            max_input = total_add_memory / (64 * cache_block_size + add_memory/in_len)
+            logger.info(f"total_add_memory {total_add_memory} B")
+            logger.info(f"guess max_input {max_input} K")
+            logger.info(f"actually input_len = {num_gpu_blocks*16/1024} K")
         return num_gpu_blocks, num_cpu_blocks
 
     def _warm_up_model(self) -> None:
