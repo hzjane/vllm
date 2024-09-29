@@ -157,7 +157,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
 
         gc.collect()
         torch.xpu.empty_cache()
-        flag = os.getenv("TEST_INPUT", None)
+        flag = os.getenv("IPEX_LLM_MAX_INPUT_LENGTH_DETAIL", None)
         if flag is not None:
             in_len = int(self.scheduler_config.max_num_batched_tokens / 1024)
             logger.info(f"before_memory {before_memory/(1024**3)} GB")
@@ -168,8 +168,9 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
             total_add_memory = total_gpu_memory*self.cache_config.gpu_memory_utilization-before_memory
             max_input = total_add_memory / (1024/self.cache_config.block_size*cache_block_size + add_memory/in_len)
             logger.info(f"total_add_memory {total_add_memory} B")
-            logger.info(f"guess max_input {max_input} K")
-            logger.info(f"actually input_len = {num_gpu_blocks*self.cache_config.block_size/1024} K")
+            logger.info(f"max-num-batched-tokens {in_len} K")
+            logger.info(f"theoretical max input length {max_input} K")
+            logger.info(f"num_gpu_blocks actually support max input length {num_gpu_blocks*self.cache_config.block_size/1024} K")
         return num_gpu_blocks, num_cpu_blocks
 
     def _warm_up_model(self) -> None:
