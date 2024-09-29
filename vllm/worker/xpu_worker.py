@@ -166,10 +166,10 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
             add_memory = peak_memory-before_memory
             logger.info(f"add_memory {add_memory} B")
             total_add_memory = total_gpu_memory*self.cache_config.gpu_memory_utilization-before_memory
-            max_input = total_add_memory / (64 * cache_block_size + add_memory/in_len)
+            max_input = total_add_memory / (1024/self.cache_config.block_size*cache_block_size + add_memory/in_len)
             logger.info(f"total_add_memory {total_add_memory} B")
             logger.info(f"guess max_input {max_input} K")
-            logger.info(f"actually input_len = {num_gpu_blocks*16/1024} K")
+            logger.info(f"actually input_len = {num_gpu_blocks*self.cache_config.block_size/1024} K")
         return num_gpu_blocks, num_cpu_blocks
 
     def _warm_up_model(self) -> None:
