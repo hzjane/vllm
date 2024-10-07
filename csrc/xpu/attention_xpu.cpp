@@ -388,7 +388,7 @@ void context_attention_kernel_v1(
             softmaxv = softmaxv * attn_exp;
             max_attn = new_max_attn;
             const simd<scalar_t, GS> attn_expv = exp(attnv - max_attn);
-#pragma unorll
+#pragma unroll
             for (size_t r = 0; r < GS; ++r) {
               simd<scalar_t, HD> value_row = slm_block_load<scalar_t, HD>(
                   value_slm_offset + r * HD * sizeof(scalar_t));
@@ -691,7 +691,7 @@ void context_attention_kernel_v2(
 
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   int padded_max_context_len =
-      DIVIDE_ROUND_UP(max_context_len, BLOCK_SIZE) * BLOCK_SIZE;
+      DIVIDE_ROUND_UP(max_context_len + 1 + max_input_length, BLOCK_SIZE) * BLOCK_SIZE;
   int logits_size = padded_max_context_len * sizeof(float);
   int outputs_size = (NUM_WARPS / 2) * HD * sizeof(float);
   // Python-side check in
@@ -848,7 +848,12 @@ void context_attention_kernel_v2(
                 // Store the partial reductions to shared memory.
                 // NOTE(woosuk): It is required to zero out the
                 // masked logits.
-                const bool mask = token_idx >= context_len;
+                // TODO: consider set this to > biger position.
+                // Consider context_len is 512 (511  real + 1 query token)
+                // valid token_idx should be in the range of [0, context_len]
+                // And we shall set this to >
+                // const bool mask = token_idx >= context_len;
+                const bool mask = token_idx > context_len;
                 // TODO: uncomment
                 logits[token_idx - start_token_idx] = mask ? 0.f : qk;
                 // Update the max value.
