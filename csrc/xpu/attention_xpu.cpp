@@ -2089,18 +2089,6 @@ torch::Tensor context_attention_forward_v2(
       output.stride(0), output.stride(1), num_queries_per_kv,
       max_input_length, batch_size, num_heads, query.size(0),
       max_context_length);
-
-    // vllm::context_attention_kernel<sycl::half, 32, 128>(
-    //     query.data_ptr(), key.data_ptr(), value.data_ptr(),
-    //     block_tables.data_ptr(), attn_scale, query_start_loc.data_ptr(),
-    //     seq_lens.data_ptr(), context_lens.data_ptr(), block_size, x,
-    //     output.data_ptr(), block_table_stride_bsz, block_table_stride_seq,
-    //     query_stride_token, query_stride_head, query_stride_dim,
-    //     k_cache_stride_token, k_cache_stride_head, k_cache_stride_head_dim,
-    //     k_cache_stride_block, k_cache_stride_x, v_cache_stride_token,
-    //     v_cache_stride_head, v_cache_stride_head_dim, v_cache_stride_block,
-    //     output.stride(0), output.stride(1), num_queries_per_kv,
-    //     max_input_length, batch_size, num_heads);
     return output;
 }
 
@@ -2154,28 +2142,34 @@ torch::Tensor context_attention_forward_v1(
   int v_cache_stride_head = value.stride(1);
   int v_cache_stride_head_dim = value.stride(2);
   int v_cache_stride_block = value.stride(3);
-  // vllm::context_attention_kernel_v2<sycl::half, 32, 128>(
-  //     query.data_ptr(), key.data_ptr(), value.data_ptr(),
-  //     block_tables.data_ptr(), attn_scale, query_start_loc.data_ptr(),
-  //     seq_lens.data_ptr(), context_lens.data_ptr(), block_size, x,
-  //     output.data_ptr(), block_table_stride_bsz, block_table_stride_seq,
-  //     query_stride_token, query_stride_head, query_stride_dim,
-  //     k_cache_stride_token, k_cache_stride_head, k_cache_stride_head_dim,
-  //     k_cache_stride_block, k_cache_stride_x, v_cache_stride_token,
-  //     v_cache_stride_head, v_cache_stride_head_dim, v_cache_stride_block,
-  //     output.stride(0), output.stride(1), num_queries_per_kv, max_input_length,
-  //     batch_size, num_heads, query.size(0), max_context_length);
-
-  vllm::context_attention_kernel_v1<sycl::half, 32, 128>(
-      query.data_ptr(), key.data_ptr(), value.data_ptr(),
-      block_tables.data_ptr(), attn_scale, query_start_loc.data_ptr(),
-      seq_lens.data_ptr(), context_lens.data_ptr(), block_size, x,
-      output.data_ptr(), block_table_stride_bsz, block_table_stride_seq,
-      query_stride_token, query_stride_head, query_stride_dim,
-      k_cache_stride_token, k_cache_stride_head, k_cache_stride_head_dim,
-      k_cache_stride_block, k_cache_stride_x, v_cache_stride_token,
-      v_cache_stride_head, v_cache_stride_head_dim, v_cache_stride_block,
-      output.stride(0), output.stride(1), num_queries_per_kv,
-      max_input_length, batch_size, num_heads);
+  switch(head_dim) {
+    case 128:
+      vllm::context_attention_kernel_v1<sycl::half, 32, 128>(
+          query.data_ptr(), key.data_ptr(), value.data_ptr(),
+          block_tables.data_ptr(), attn_scale, query_start_loc.data_ptr(),
+          seq_lens.data_ptr(), context_lens.data_ptr(), block_size, x,
+          output.data_ptr(), block_table_stride_bsz, block_table_stride_seq,
+          query_stride_token, query_stride_head, query_stride_dim,
+          k_cache_stride_token, k_cache_stride_head, k_cache_stride_head_dim,
+          k_cache_stride_block, k_cache_stride_x, v_cache_stride_token,
+          v_cache_stride_head, v_cache_stride_head_dim, v_cache_stride_block,
+          output.stride(0), output.stride(1), num_queries_per_kv,
+          max_input_length, batch_size, num_heads);
+      break;
+    case 64:
+      vllm::context_attention_kernel_v1<sycl::half, 32, 64>(
+          query.data_ptr(), key.data_ptr(), value.data_ptr(),
+          block_tables.data_ptr(), attn_scale, query_start_loc.data_ptr(),
+          seq_lens.data_ptr(), context_lens.data_ptr(), block_size, x,
+          output.data_ptr(), block_table_stride_bsz, block_table_stride_seq,
+          query_stride_token, query_stride_head, query_stride_dim,
+          k_cache_stride_token, k_cache_stride_head, k_cache_stride_head_dim,
+          k_cache_stride_block, k_cache_stride_x, v_cache_stride_token,
+          v_cache_stride_head, v_cache_stride_head_dim, v_cache_stride_block,
+          output.stride(0), output.stride(1), num_queries_per_kv,
+          max_input_length, batch_size, num_heads);
+      break;
+    default: throw std::runtime_error("unsupported head_dim");
+  }
   return output;
 }
