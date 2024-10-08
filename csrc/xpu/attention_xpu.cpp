@@ -2064,6 +2064,8 @@ torch::Tensor context_attention_forward_v2(
   // key: num_blocks, num_kv_heads, head_size // x, num_blocks, x)
   // value: [num_blocks, num_kv_heads, head_size, block_dim]
   int block_size = value.size(3);
+  // Currently, only block_size 16 is supported...
+  assert(block_size == 16);
   int x = key.size(4);
   int block_table_stride_bsz = block_tables.stride(0);
   int block_table_stride_seq = block_tables.stride(1);
@@ -2077,18 +2079,65 @@ torch::Tensor context_attention_forward_v2(
   int v_cache_stride_head = value.stride(1);
   int v_cache_stride_head_dim = value.stride(2);
   int v_cache_stride_block = value.stride(3);
-  vllm::context_attention_kernel_v2<sycl::half, 32, 128>(
-      query.data_ptr(), key.data_ptr(), value.data_ptr(),
-      block_tables.data_ptr(), attn_scale, query_start_loc.data_ptr(),
-      seq_lens.data_ptr(), context_lens.data_ptr(), block_size, x,
-      output.data_ptr(), block_table_stride_bsz, block_table_stride_seq,
-      query_stride_token, query_stride_head, query_stride_dim,
-      k_cache_stride_token, k_cache_stride_head, k_cache_stride_head_dim,
-      k_cache_stride_block, k_cache_stride_x, v_cache_stride_token,
-      v_cache_stride_head, v_cache_stride_head_dim, v_cache_stride_block,
-      output.stride(0), output.stride(1), num_queries_per_kv,
-      max_input_length, batch_size, num_heads, query.size(0),
-      max_context_length);
+  switch(head_dim) {
+    case 128:
+      vllm::context_attention_kernel_v2<sycl::half, 32, 128>(
+        query.data_ptr(), key.data_ptr(), value.data_ptr(),
+        block_tables.data_ptr(), attn_scale, query_start_loc.data_ptr(),
+        seq_lens.data_ptr(), context_lens.data_ptr(), block_size, x,
+        output.data_ptr(), block_table_stride_bsz, block_table_stride_seq,
+        query_stride_token, query_stride_head, query_stride_dim,
+        k_cache_stride_token, k_cache_stride_head, k_cache_stride_head_dim,
+        k_cache_stride_block, k_cache_stride_x, v_cache_stride_token,
+        v_cache_stride_head, v_cache_stride_head_dim, v_cache_stride_block,
+        output.stride(0), output.stride(1), num_queries_per_kv,
+        max_input_length, batch_size, num_heads, query.size(0),
+        max_context_length);
+      break;
+    case 64:
+      vllm::context_attention_kernel_v2<sycl::half, 32, 64>(
+        query.data_ptr(), key.data_ptr(), value.data_ptr(),
+        block_tables.data_ptr(), attn_scale, query_start_loc.data_ptr(),
+        seq_lens.data_ptr(), context_lens.data_ptr(), block_size, x,
+        output.data_ptr(), block_table_stride_bsz, block_table_stride_seq,
+        query_stride_token, query_stride_head, query_stride_dim,
+        k_cache_stride_token, k_cache_stride_head, k_cache_stride_head_dim,
+        k_cache_stride_block, k_cache_stride_x, v_cache_stride_token,
+        v_cache_stride_head, v_cache_stride_head_dim, v_cache_stride_block,
+        output.stride(0), output.stride(1), num_queries_per_kv,
+        max_input_length, batch_size, num_heads, query.size(0),
+        max_context_length);
+      break;
+    case 80:
+      vllm::context_attention_kernel_v2<sycl::half, 32, 80>(
+        query.data_ptr(), key.data_ptr(), value.data_ptr(),
+        block_tables.data_ptr(), attn_scale, query_start_loc.data_ptr(),
+        seq_lens.data_ptr(), context_lens.data_ptr(), block_size, x,
+        output.data_ptr(), block_table_stride_bsz, block_table_stride_seq,
+        query_stride_token, query_stride_head, query_stride_dim,
+        k_cache_stride_token, k_cache_stride_head, k_cache_stride_head_dim,
+        k_cache_stride_block, k_cache_stride_x, v_cache_stride_token,
+        v_cache_stride_head, v_cache_stride_head_dim, v_cache_stride_block,
+        output.stride(0), output.stride(1), num_queries_per_kv,
+        max_input_length, batch_size, num_heads, query.size(0),
+        max_context_length);
+      break;
+    case 96:
+      vllm::context_attention_kernel_v2<sycl::half, 32, 96>(
+        query.data_ptr(), key.data_ptr(), value.data_ptr(),
+        block_tables.data_ptr(), attn_scale, query_start_loc.data_ptr(),
+        seq_lens.data_ptr(), context_lens.data_ptr(), block_size, x,
+        output.data_ptr(), block_table_stride_bsz, block_table_stride_seq,
+        query_stride_token, query_stride_head, query_stride_dim,
+        k_cache_stride_token, k_cache_stride_head, k_cache_stride_head_dim,
+        k_cache_stride_block, k_cache_stride_x, v_cache_stride_token,
+        v_cache_stride_head, v_cache_stride_head_dim, v_cache_stride_block,
+        output.stride(0), output.stride(1), num_queries_per_kv,
+        max_input_length, batch_size, num_heads, query.size(0),
+        max_context_length);
+      break;
+    default: throw std::runtime_error("unsupported head_dim");
+  }
     return output;
 }
 
