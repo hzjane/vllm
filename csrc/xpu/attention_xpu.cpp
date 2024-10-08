@@ -238,12 +238,8 @@ void context_attention_kernel_v1(
               (scalar_t*)out +
               (query_loc[bsz_idx] + seq_idx) * out_stride_tokens +
               head_idx * out_stride_head;
-          // The indexing for key_head will be wired...
-          // Assuming context length is in n * GS + offset_part, now
-          // we are handling the n * GS part
+
           int32_t context_groups = context_len / GS;
-          // TODO: consider context groups later
-          // TODO: consider n*GS part later
 
           // Each token load its query_row
           simd<scalar_t, HD> query_row =
@@ -252,21 +248,10 @@ void context_attention_kernel_v1(
           simd<scalar_t, GS> softmaxv = 0;
           scalar_t max_attn = -sycl::detail::max_v<scalar_t>();
 
-          // ############################ Handle n * GS context part
-          // ######################
+          // ################# Handle n * GS context part ######################
           int32_t n = context_len / GS;
           int32_t context_offset = context_len % GS;
 
-          // static const CONSTANT char FMT[] =
-          //     "GroupID = %2d seq_len = %d seq_idx = %d token_idx =
-          //     %d token_position = %d " "context_len = %d n = %d
-          //     context_offset = %d\n";
-          // sycl::ext::oneapi::experimental::printf(
-          //     FMT, gid, seq_bound, seq_idx,
-          //     token_idx, token_position, context_len, n,
-          //     context_offset);
-
-          // TODO: this target_key_position has problems
           for (int32_t group = 0; group < n; ++group) {
             size_t target_key_position = group * GS + tid;
             int which_block = target_key_position / block_size;
@@ -279,7 +264,7 @@ void context_attention_kernel_v1(
                 kv_head_idx * k_cache_stride_head +
                 which_slot * k_cache_stride_block_size;
             for (int i = 0; i < HD / x; i++) {
-              // Load 8 elements
+              // Load 8 elements, decided by x
               simd<scalar_t, 8> key_row =
                   block_load<scalar_t, 8>(key_head + i * k_cache_stride_dim);
               slm_block_store(key_slm_offset + tid * HD * sizeof(scalar_t) +
@@ -292,7 +277,6 @@ void context_attention_kernel_v1(
                 physical_block_number * v_cache_stride_tokens +
                 kv_head_idx * v_cache_stride_head + which_slot;
             for (int i = 0; i < HD; i++) {
-              // Seems to have an error here
               scalar_t temp_value = value_head[i * v_cache_stride_dim];
               slm_scalar_store<scalar_t>(value_slm_offset +
                                              tid * HD * sizeof(scalar_t) +
@@ -301,7 +285,6 @@ void context_attention_kernel_v1(
             }
             barrier();
 
-            // # Now begins to calculate attention...
             // Calculate QK^T for this group...
             simd<scalar_t, GS> attnv;
 #pragma unroll
@@ -330,11 +313,9 @@ void context_attention_kernel_v1(
             barrier();
           }
 
-          // ########################### End for handling context n *
-          // GS part ###########
+          // ########## End for handling context n * GS part ###########
 
-          // ############################# Handle n * GS
-          // ############################
+          // ########## Handle n * GS ################
           for (size_t group = 0; group < gid; ++group) {
             // 1. begins to load each position's key and value
             size_t target_key_position = context_len + group * GS + tid;
@@ -361,7 +342,6 @@ void context_attention_kernel_v1(
                 physical_block_number * v_cache_stride_tokens +
                 kv_head_idx * v_cache_stride_head + which_slot;
             for (int i = 0; i < HD; i++) {
-              // Seems to have an error here
               scalar_t temp_value = value_head[i * v_cache_stride_dim];
               slm_scalar_store<scalar_t>(value_slm_offset +
                                              tid * HD * sizeof(scalar_t) +
@@ -398,15 +378,14 @@ void context_attention_kernel_v1(
             barrier();
           }
 
-          // ############## End of handle n * GS part
-          // ##################
+          // ######### End of handle n * GS part ##########
 
           // ################ Handle offset part ####################
           scalar_t softmax =
               sycl::ext::intel::esimd::detail::sum<scalar_t, scalar_t, GS>(
                   softmaxv);
 
-          // ############## handle context offset ############
+          // ########### handle context offset ############
           if (tid < context_offset) {
             size_t target_key_position = n * GS + tid;
             int which_block = target_key_position / block_size;
@@ -443,11 +422,8 @@ void context_attention_kernel_v1(
 
           barrier();
 
-          // FIXME: For all the tokens, we will need to calculate the
-          // qks For tokens that are valid... if (tid <
-          // context_offset) {
           if (token_position < seq_bound) {
-            // This could be an error place
+#pragma unroll
             for (size_t r = 0; r < context_offset; ++r) {
               simd<scalar_t, HD> key_row = slm_block_load<scalar_t, HD>(
                   key_slm_offset + r * HD * sizeof(scalar_t));
@@ -471,107 +447,14 @@ void context_attention_kernel_v1(
             }
           }
           barrier();
+
           // ############## handle seq offset #################
-          // TODO: check if this part has problem or not...
-          // if (seq_idx < seq_bound) {
-          //     const int64_t which_block =
-          //         static_cast<int64_t>(token_position /
-          //         block_size);
-          //     const int64_t which_slot =
-          //         static_cast<int64_t>(token_position %
-          //         block_size);
-
-          //     // TODO: we might need to cast this to int64_t to
-          //     avoid
-          //     // overflow...
-          //     const int64_t physical_block_number =
-          //         static_cast<int64_t>(block_table[which_block]);
-
-          //     const scalar_t* key_head =
-          //         (const scalar_t*)key +
-          //         physical_block_number * k_cache_stride_tokens +
-          //         kv_head_idx * k_cache_stride_head +
-          //         which_slot * k_cache_stride_block_size;
-
-          //     // Let's do a loop to load the data
-          //     // 0 to 7
-          //     for (int i = 0; i < HD / x; i++) {
-          //         // Load 8 elements
-          //         simd<scalar_t, 8> key_row = block_load<scalar_t,
-          //         8>(
-          //             key_head + i * k_cache_stride_dim);
-          //         slm_block_store(key_slm_offset +
-          //                             tid * HD * sizeof(scalar_t) +
-          //                             8 * i * sizeof(scalar_t),
-          //                         key_row);
-          //     }
-
-          //     // v_cache in shape [num_blocks, num_kv_heads,
-          //     head_size,
-          //     // block_size]
-          //     const scalar_t* value_head =
-          //         (const scalar_t*)value +
-          //         physical_block_number * v_cache_stride_tokens +
-          //         kv_head_idx * v_cache_stride_head + which_slot;
-          //     for (int i = 0; i < HD; i++) {
-          //         // Seems to have an error here
-          //         scalar_t temp_value =
-          //             value_head[i * v_cache_stride_dim];
-          //         slm_scalar_store<scalar_t>(
-          //             value_slm_offset + tid * HD *
-          //             sizeof(scalar_t) +
-          //                 i * sizeof(scalar_t),
-          //             temp_value);
-          //     }
-          // }
-          // barrier();
-
-          // if (seq_idx < seq_bound) {
-          //     // handle last a few of tokens
-          //     for (size_t r = 0; r <= tid; ++r) {
-          //         simd<scalar_t, HD> key_row =
-          //             slm_block_load<scalar_t, HD>(
-          //                 key_slm_offset + r * HD *
-          //                 sizeof(scalar_t));
-          //         simd<scalar_t, HD> value_row =
-          //             slm_block_load<scalar_t, HD>(
-          //                 value_slm_offset + r * HD *
-          //                 sizeof(scalar_t));
-          //         scalar_t attn =
-          //         sycl::ext::intel::esimd::detail::sum<
-          //             scalar_t, scalar_t, HD>(query_row * key_row);
-          //         if (attn <= max_attn) {
-          //             scalar_t attn_exp =
-          //                 sycl::ext::intel::esimd::exp(attn -
-          //                 max_attn);
-          //             accv += value_row * attn_exp;
-          //             softmax += attn_exp;
-          //         } else {
-          //             scalar_t attn_exp =
-          //                 sycl::ext::intel::esimd::exp(max_attn -
-          //                 attn);
-          //             accv = accv * attn_exp + value_row;
-          //             softmax = softmax * attn_exp + 1;
-          //             max_attn = attn;
-          //         }
-          //     }
-
-          //     if (softmax > 0) {
-          //         simd<scalar_t, HD> result = accv / softmax;
-          //         block_store(out_head, result);
-          //     } else {
-          //         simd<scalar_t, HD> result = 0;
-          //         block_store(out_head, result);
-          //     }
-          // }
           if (token_position < seq_bound) {
             const int64_t which_block =
                 static_cast<int64_t>(token_position / block_size);
             const int64_t which_slot =
                 static_cast<int64_t>(token_position % block_size);
 
-            // TODO: we might need to cast this to int64_t to avoid
-            // overflow...
             const int64_t physical_block_number =
                 static_cast<int64_t>(block_table[which_block]);
 
@@ -581,8 +464,6 @@ void context_attention_kernel_v1(
                 kv_head_idx * k_cache_stride_head +
                 which_slot * k_cache_stride_block_size;
 
-            // Let's do a loop to load the data
-            // 0 to 7
             for (int i = 0; i < HD / x; i++) {
               // Load 8 elements
               simd<scalar_t, 8> key_row =
@@ -592,14 +473,12 @@ void context_attention_kernel_v1(
                               key_row);
             }
 
-            // v_cache in shape [num_blocks, num_kv_heads,
-            // head_size, block_size]
+            // [num_blocks, num_kv_heads, head_size, block_size]
             const scalar_t* value_head =
                 (const scalar_t*)value +
                 physical_block_number * v_cache_stride_tokens +
                 kv_head_idx * v_cache_stride_head + which_slot;
             for (int i = 0; i < HD; i++) {
-              // Seems to have an error here
               scalar_t temp_value = value_head[i * v_cache_stride_dim];
               slm_scalar_store<scalar_t>(value_slm_offset +
                                              tid * HD * sizeof(scalar_t) +
@@ -610,7 +489,6 @@ void context_attention_kernel_v1(
           barrier();
 
           if (token_position < seq_bound) {
-            // handle last a few of tokens
             for (size_t r = 0; r <= tid; ++r) {
               simd<scalar_t, HD> key_row = slm_block_load<scalar_t, HD>(
                   key_slm_offset + r * HD * sizeof(scalar_t));
@@ -647,8 +525,6 @@ void context_attention_kernel_v1(
   queue.submit(cgf);
 }
 
-// How about implement a first edition that can be used with non-chunked prefill
-// requests, so that we can make sure the reference for heads is correct
 template <typename T, int GS, int HD>
 void context_attention_kernel_v2(
     void* query, void* key, void* value, const void* block_tables,
@@ -705,7 +581,6 @@ void context_attention_kernel_v2(
   sycl::queue& queue = vllm::xpu::vllmGetQueue();
 
   auto cgf = [&](sycl::handler& handle) {
-    // sycl::stream output_stream(128000, 128, handle);
     sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(
         sycl::range<1>(shared_mem_size), handle);
     sycl::local_accessor<Q_Vec, 1> q_vecs_acc_ct1(
@@ -714,12 +589,8 @@ void context_attention_kernel_v2(
         sycl::range<1>(2 * NUM_WARPS), handle);
 
     handle.parallel_for(
-        // (batch_size, num_heads, max_input_length * 128) (1, 1, 128)
-        // Each workgroup handles one token
         sycl::nd_range<3>(grid * block, block),
         [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {
-          // FIXME: change this...
-          // const int bsz_idx = item_ct1.get_global_id(0);
           const int bsz_idx = item_ct1.get_group(0);
           const int seq_idx = item_ct1.get_group(2);
           constexpr bool USE_PARTITIONING = false;
@@ -736,9 +607,6 @@ void context_attention_kernel_v2(
           //     << context_lens_ptr[bsz_idx] << " Seq_len: " << seq_len
           //     << " Max input length: " << max_input_length
           //     << sycl::endl;
-          // FIXME: chang this to >=
-          // Assuming seq_len is 5, then seq_idx should be 0, 1, 2, 3, 4, 5
-          // Shall the query token attend to itself?
           if (context_len >= seq_len) {
             return;
           }
@@ -750,7 +618,6 @@ void context_attention_kernel_v2(
           const int num_blocks_per_partition = num_context_blocks;
 
           const int start_block_idx = 0;
-          // TODO: remove this
           const int end_block_idx =
               MIN(start_block_idx + num_context_blocks, num_context_blocks);
 
@@ -759,10 +626,7 @@ void context_attention_kernel_v2(
           const int end_token_idx =
               MIN(start_token_idx + num_blocks * BLOCK_SIZE, context_len);
           const int num_tokens = end_token_idx - start_token_idx;
-          // THREAD_GROUP_SIZE equals to 2
           constexpr int THREAD_GROUP_SIZE = MAX(WARP_SIZE / BLOCK_SIZE, 1);
-          // 128 / 2 = 64 THREAD GROUPS -> 4 warps, 16 thread group per
-          // warp
           constexpr int NUM_THREAD_GROUPS =
               NUM_THREADS /
               THREAD_GROUP_SIZE;  // Note: This assumes THREAD_GROUP_SIZE
@@ -780,10 +644,6 @@ void context_attention_kernel_v2(
           constexpr int NUM_VECS_PER_THREAD = NUM_ELEMS_PER_THREAD / VEC_SIZE;
           const int thread_group_idx = thread_idx / THREAD_GROUP_SIZE;
           const int thread_group_offset = thread_idx % THREAD_GROUP_SIZE;
-          // num_tokens, num_heads, HD
-          // TODO: fix this
-          // const sycl_t* q_ptr =
-          //     query_ptr + seq_idx * query_stride_bs + head_idx * HD;
           const sycl_t* q_ptr =
               query_ptr + (query_loc_ptr[bsz_idx] + seq_idx) * query_stride_bs +
               head_idx * HD;
@@ -801,7 +661,6 @@ void context_attention_kernel_v2(
           float* logits = reinterpret_cast<float*>(shared_mem);
           constexpr int x = 16 / sizeof(sycl_t);
           float qk_max = -FLT_MAX;
-          // TODO: check if block_table include everything?
           const int* block_table =
               block_tables_ptr + bsz_idx * block_table_stride_batch;
 
@@ -848,15 +707,8 @@ void context_attention_kernel_v2(
                 // Store the partial reductions to shared memory.
                 // NOTE(woosuk): It is required to zero out the
                 // masked logits.
-                // TODO: consider set this to > biger position.
-                // Consider context_len is 512 (511  real + 1 query token)
-                // valid token_idx should be in the range of [0, context_len]
-                // And we shall set this to >
-                // const bool mask = token_idx >= context_len;
                 const bool mask = token_idx > context_len;
-                // TODO: uncomment
                 logits[token_idx - start_token_idx] = mask ? 0.f : qk;
-                // Update the max value.
                 qk_max = mask ? qk_max : sycl::fmax(qk_max, qk);
               }
             }
@@ -910,6 +762,7 @@ void context_attention_kernel_v2(
               block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], exp_sum, item_ct1);
           // Compute softmax.
           const float inv_sum = 1.f / (exp_sum + 1e-6f);
+#pragma unroll
           for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) {
             logits[i] *= inv_sum;
           }
@@ -1046,11 +899,6 @@ void context_attention_kernel_v2(
                 out_p + (query_loc_ptr[bsz_idx] + seq_idx) * out_stride_tokens +
                 head_idx * out_stride_head;
 
-        // sycl_t* out_ptr =
-        //     out_p +
-        //     seq_idx * num_heads * max_num_partitions * HEAD_SIZE +
-        //     head_idx * max_num_partitions * HEAD_SIZE +
-        //     partition_idx * HEAD_SIZE;
 #pragma unroll
             for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
               const int row_idx =
@@ -2187,7 +2035,7 @@ torch::Tensor context_attention_forward_v2(
     torch::Tensor block_tables, torch::Tensor query_start_loc,
     torch::Tensor seq_lens, torch::Tensor context_lens, int max_input_length,
     int max_context_length) {
-  // TODO: Dispatch to different query.scalar_type() if needed.
+  // Currently, only support fp16 here
   int64_t num_tokens = query.size(0);
   int64_t num_heads = query.size(1);
   int64_t head_dim = query.size(2);
@@ -2198,9 +2046,7 @@ torch::Tensor context_attention_forward_v2(
   auto output = at::empty({query.size(0), query.size(1), query.size(2)},
                           at::device(query.device()).dtype(query.dtype()));
 
-  // key should be in shape:
-  // 1. [num_tokens, num_kv_head, head_dim]
-  assert(key_dimension == 3 or key_dimension == 5);
+  assert(key_dimension == 5);
   assert(query.scalar_type() == key.scalar_type() &&
          query.scalar_type() == value.scalar_type());
   assert(head_dim == 128);
@@ -2265,7 +2111,7 @@ torch::Tensor context_attention_forward_v1(
     torch::Tensor block_tables, torch::Tensor query_start_loc,
     torch::Tensor seq_lens, torch::Tensor context_lens, int max_input_length,
     int max_context_length) {
-  // TODO: Dispatch to different query.scalar_type() if needed.
+  // Currently, only support fp16
   int64_t num_tokens = query.size(0);
   int64_t num_heads = query.size(1);
   int64_t head_dim = query.size(2);
