@@ -272,30 +272,18 @@ class Qwen2VisionAttention(nn.Module):
                 (num_tokens, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head),
                 dtype=query.dtype, device=query.device)
         start = 0
-        from vllm.attention.backends.ipex_attn import use_sdp_causal
         for seq_len, mask in zip(seq_lens,
                                 att_masks):
             end = start + seq_len
-            if use_sdp_causal(self.hidden_size_per_attention_head, query) and False:
-                import xe_addons
-                sub_out = xe_addons.sdp_causal(
-                    query[:, :, start:end, :].contiguous(),
-                    key[:, :, start:end, :].contiguous(),
-                    value[:, :, start:end, :].contiguous(),
-                    mask)
-                print(f"sub_out: {sub_out.shape}")
-                sub_out = sub_out.squeeze(0).movedim(
-                        0, 1)
-            else:
-                sub_out = torch.nn.functional.scaled_dot_product_attention(
-                    query[:, :, start:end, :],
-                    key[:, :, start:end, :],
-                    value[:, :, start:end, :],
-                    attn_mask=mask,
-                    dropout_p=0.0,
-                    is_causal=False,
-                    scale= self.hidden_size_per_attention_head**-0.5).squeeze(0).movedim(
-                        0, 1)
+            sub_out = torch.nn.functional.scaled_dot_product_attention(
+                query[:, :, start:end, :],
+                key[:, :, start:end, :],
+                value[:, :, start:end, :],
+                attn_mask=mask,
+                dropout_p=0.0,
+                is_causal=False,
+                scale= self.hidden_size_per_attention_head**-0.5).squeeze(0).movedim(
+                    0, 1)
             output[start:end, :, :] = sub_out
             start = end
         output = output.view(-1, batch_size, self.hidden_size_per_attention_head * self.num_attention_heads_per_partition)
