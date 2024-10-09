@@ -350,7 +350,8 @@ def _get_full_multimodal_text_prompt(placeholder_counts: Dict[str, int],
 
     # NOTE: For now we always add missing placeholders at the front of
     # the prompt. This may change to be customizable in the future.
-    return "\n".join(missing_placeholders + [text_prompt])
+    #return "\n".join(missing_placeholders + [text_prompt])
+    return "".join(missing_placeholders + [text_prompt])
 
 
 # No need to validate using Pydantic again
@@ -398,7 +399,6 @@ def _parse_chat_message_content_parts(
     if mm_placeholder_counts:
         text_prompt = _get_full_multimodal_text_prompt(mm_placeholder_counts,
                                                        text_prompt)
-
     return [ConversationMessage(role=role, content=text_prompt)]
 
 
