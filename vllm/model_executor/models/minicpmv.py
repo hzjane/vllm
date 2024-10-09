@@ -745,13 +745,8 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
         for i in range(B):
             patch_attn_mask[i, :tgt_sizes[i][0] * tgt_sizes[i][1]] = True
 
-<<<<<<< HEAD
-        return self.get_vision_embedding(all_pixel_values.type(dtype),
-                                         patch_attn_mask.to(device), tgt_sizes.to(device))
-=======
         return self.get_vision_embedding(all_pixel_values.type(dtype).to(device),
                                          patch_attn_mask, tgt_sizes.to(device))
->>>>>>> upstream/061_test_0924
 
     def is_default_weight_loading(self, name: str) -> bool:
         return "resampler" in name
