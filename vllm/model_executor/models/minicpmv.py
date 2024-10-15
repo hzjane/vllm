@@ -419,7 +419,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
                            self.vpm.embeddings.embed_dim)
         self.embed_dim = self.config.hidden_size
         self.resampler = self.init_resampler(self.embed_dim, self.vision_dim)
-        #self.resampler.to(device="cuda", dtype=param_dtype)
+        # self.resampler.to(device="cuda", dtype=param_dtype)
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)
