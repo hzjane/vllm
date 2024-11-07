@@ -278,7 +278,10 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 # Context_len: how many tokens that have been computed
                 if is_prompt:
-                    context_len = seq_data.get_num_computed_tokens()
+                    if computed_block_nums is not None:
+                        context_len = len(computed_block_nums) * self.block_size
+                    else:
+                        context_len = 0
                 else:
                     context_len = seq_data.get_len() - 1
 
@@ -294,7 +297,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                     tokens = [seq_data.get_last_token_id()]
 
                 # FIXME: add prefix caching
-                if (self.scheduler_config.chunked_prefill_enabled or not is_prompt):
+                if (computed_block_nums is not None or self.scheduler_config.chunked_prefill_enabled or not is_prompt):
                     # Chunked prefill or decoding
                     # For chunked prefill, the block tables may not be None
                     if seq_group_metadata.block_tables is not None:
@@ -421,7 +424,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
             query_start_loc=query_start_loc,
             # seq_start_loc=seq_start_loc,
             context_lens=context_lens_tensor,
-            block_tables=block_tables if (self.scheduler_config.chunked_prefill_enabled or not is_prompt) else torch.tensor([], device=self.device, dtype=torch.int) # 11
+            block_tables=block_tables if (self.scheduler_config.chunked_prefill_enabled or not is_prompt or self.cache_config.enable_prefix_caching) else torch.tensor([], device=self.device, dtype=torch.int) # 11
         )
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,

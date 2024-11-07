@@ -370,9 +370,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     value = value.repeat_interleave(self.num_queries_per_kv,
                                                     dim=1)
                 import vllm._C.ops
-                value = os.environ.get('USE_CONTEXT_V2')
-                if value is not None:
-                    assert self.head_size == 128
+                value = os.environ.get('USE_CONTEXT_V1')
+                if self.head_size == 128 and value is None:
                     out = vllm._C.ops.context_attention_forward_v2(query, key_cache, value_cache, prefill_meta.block_tables, prefill_meta.query_start_loc, prefill_meta.seq_lens, prefill_meta.context_lens, prefill_meta.max_seqlen, torch.amax(prefill_meta.context_lens).item())
                 else:
                     out = vllm._C.ops.context_attention_forward_v1(query, key_cache, value_cache, prefill_meta.block_tables, prefill_meta.query_start_loc, prefill_meta.seq_lens, prefill_meta.context_lens, prefill_meta.max_seqlen, torch.amax(prefill_meta.context_lens).item())
