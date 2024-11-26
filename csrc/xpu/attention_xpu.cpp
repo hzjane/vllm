@@ -546,7 +546,7 @@ void context_attention_kernel_v2(
     const int num_queries_per_kv, const int max_input_length,
     const int batch_size, const int num_heads, const int num_tokens,
     const int max_context_len) {
-  constexpr int BLOCK_SIZE = 16;
+  constexpr int BLOCK_SIZE = 8;
   constexpr int NUM_THREADS = 128;
   // Each wrap handles one context block, therefore, each thread_group_size is
   // this.

@@ -358,7 +358,6 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             context_lens=context_lens_tensor,
             block_tables=block_tables if (self.scheduler_config.chunked_prefill_enabled or not is_prompt or self.cache_config.enable_prefix_caching) else torch.tensor([], device=self.device, dtype=torch.int) # 11
         )
-        print(f"attn_metadata: {attn_metadata}")
         if multi_modal_inputs_list is not None and len(multi_modal_inputs_list) > 0:
             multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
         else:
