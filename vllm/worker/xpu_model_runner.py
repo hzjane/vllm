@@ -273,26 +273,21 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                     # block_table is a logical -> to physical transition...
                     # i // block_size is the logical block number
                     slot_mapping.append(block_number * self.block_size + block_offset)
-        max_query_len = max(query_lens)
         max_decode_seq_len = max(decode_seq_lens, default=0)
-
-        max_block_table_len = max(
-            len(block_table) for block_table in block_tables)
-        block_tables = make_tensor_with_pad(
-            block_tables,
-            max_len=max_block_table_len,
-            pad=0,
-            dtype=torch.int,
-            device=self.device,
-        )
-        assert max_query_len > 0, ("query_lens: {}".format(query_lens))
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=self.device)
-
-        # (batch_size + 1,). The cumulative sequence lengths of the sequences in
-        # the batch, used to index into sequence. E.g., if the sequence length is
-        # [4, 6], it is [0, 4, 10].
+        is_prompt = (self.seq_group_metadata_list[0].is_prompt
+                if self.seq_group_metadata_list else None)
+        need_block_table = False
+        if  self.scheduler_config.chunked_prefill_enabled or not is_prompt or self.cache_config.enable_prefix_caching:
+            need_block_table = True
+            max_block_table_len = max(
+                len(block_table) for block_table in block_tables)
+            block_tables = make_tensor_with_pad(
+                block_tables,
+                max_len=max_block_table_len,
+                pad=0,
+                dtype=torch.int,
+                device=self.device,
+            )
         input_tokens_tensor = torch.tensor(input_tokens,
                                            dtype=torch.long,
                                            device=self.device)
@@ -302,17 +297,18 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         slot_mapping_tensor = torch.tensor(slot_mapping,
                                            dtype=torch.long,
                                            device=self.device)
-
+        if need_block_table:
+            seq_lens_tensor = torch.tensor(seq_lens,
+                                        dtype=torch.int,
+                                        device=self.device)
+        else:
+            seq_lens_tensor = torch.tensor([])
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
                                            device=self.device)
         query_lens_tensor = torch.tensor(query_lens,
                                          dtype=torch.long,
                                          device=self.device)
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=self.device)
-
         query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
                                       dtype=torch.int32,
                                       device=self.device)
@@ -323,8 +319,6 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                      out=query_start_loc[1:])
 
         # Generate attn_metadata
-        is_prompt = (self.seq_group_metadata_list[0].is_prompt
-                if self.seq_group_metadata_list else None)
         attn_metadata = self.attn_backend.make_metadata(
             # FIXME: Later maybe we can get rid of this parameter
             is_prompt=is_prompt, #1
@@ -332,7 +326,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             slot_mapping=slot_mapping_tensor, # 2
             num_prefill_tokens=num_prefill_tokens, # 7
             num_decode_tokens=num_decode_tokens, # 8
-            seq_lens=seq_lens_tensor, # 3
+            seq_lens=seq_lens, # 3
             seqlen_q=torch.tensor([]), # 4
             # max_seqlen=max_seqlen, # 5
             max_seqlen=max(query_lens),
@@ -342,7 +336,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             query_start_loc=query_start_loc,
             # seq_start_loc=seq_start_loc,
             context_lens=context_lens_tensor,
-            block_tables=block_tables if (self.scheduler_config.chunked_prefill_enabled or not is_prompt or self.cache_config.enable_prefix_caching) else torch.tensor([], device=self.device, dtype=torch.int) # 11
+            block_tables=block_tables if need_block_table else torch.tensor([], device=self.device, dtype=torch.int) # 11
         )
         if multi_modal_inputs_list is not None and len(multi_modal_inputs_list) > 0:
             multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
