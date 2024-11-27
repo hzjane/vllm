@@ -290,18 +290,9 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                                        dtype=torch.int,
                                        device=self.device)
 
-        # What is the usage of this seq_start_loc?
-        seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
-                                    dtype=torch.int32,
-                                    device=self.device)
-
         # (batch_size + 1,). The cumulative sequence lengths of the sequences in
         # the batch, used to index into sequence. E.g., if the sequence length is
         # [4, 6], it is [0, 4, 10].
-        torch.cumsum(seq_lens_tensor,
-                     dim=0,
-                     dtype=seq_start_loc.dtype,
-                     out=seq_start_loc[1:])
         input_tokens_tensor = torch.tensor(input_tokens,
                                            dtype=torch.long,
                                            device=self.device)
@@ -331,11 +322,6 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
 
-        tmp = [0]
-        tmp.extend(seq_lens)
-        seqlen = torch.tensor(tmp)
-        seqlen_q = torch.cumsum(seqlen, dim=0).to(device=self.device)
-
         # Generate attn_metadata
         is_prompt = (self.seq_group_metadata_list[0].is_prompt
                 if self.seq_group_metadata_list else None)
@@ -347,7 +333,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             num_prefill_tokens=num_prefill_tokens, # 7
             num_decode_tokens=num_decode_tokens, # 8
             seq_lens=seq_lens_tensor, # 3
-            seqlen_q=seqlen_q, # 4
+            seqlen_q=torch.tensor([]), # 4
             # max_seqlen=max_seqlen, # 5
             max_seqlen=max(query_lens),
             seq_lens_tensor=seq_lens_tensor, # 9
