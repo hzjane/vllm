@@ -338,13 +338,17 @@ class SiglipAttention(nn.Module):
         qkv = qkv.view(batch_size, q_len, self.num_heads * 3, self.head_dim)
         qkv = qkv.transpose(1, 2)
         query_states, key_states, value_states = qkv.chunk(3, dim=1)
+
+        from ipex_llm.transformers.models.common import padding_qkv_hd
+        query_states, key_states, value_states = padding_qkv_hd(
+            query_states, key_states, value_states,
+            72, 80
+        )
         from ipex_llm.transformers.models.utils import use_sdp_non_causal
         if use_sdp_non_causal(self.head_dim, query_states.device, query_states.dtype):
             import xe_addons
-            if attention_mask is not None:
-                attention_mask = attention_mask.unsqueeze(0)
+            attn_weights = None
             attn_output = xe_addons.sdp_non_causal(query_states, key_states.contiguous(), value_states.contiguous(), attention_mask)
-            attn_output = attn_output.squeeze(0).transpose(0, 1)
         else:
             k_v_seq_len = key_states.shape[-2]
             attn_weights = torch.matmul(query_states, key_states.transpose(
@@ -383,7 +387,7 @@ class SiglipAttention(nn.Module):
                     f"{(batch_size, self.num_heads, q_len, self.head_dim)}, "
                     "but is"
                     f" {attn_output.size()}")
-
+        attn_output = attn_output[:, :, :, :self.head_dim]
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, q_len, self.embed_dim)
 
