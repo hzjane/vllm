@@ -303,20 +303,24 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                                         device=self.device)
         else:
             seq_lens_tensor = torch.tensor([])
-        context_lens_tensor = torch.tensor(context_lens,
-                                           dtype=torch.int,
-                                           device=self.device)
-        query_lens_tensor = torch.tensor(query_lens,
-                                         dtype=torch.long,
-                                         device=self.device)
-        query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
-                                      dtype=torch.int32,
-                                      device=self.device)
+        if self.scheduler_config.chunked_prefill_enabled or self.cache_config.enable_prefix_caching:
+            context_lens_tensor = torch.tensor(context_lens,
+                                            dtype=torch.int,
+                                            device=self.device)
+            query_lens_tensor = torch.tensor(query_lens,
+                                            dtype=torch.long,
+                                            device=self.device)
+            query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
+                                        dtype=torch.int32,
+                                        device=self.device)
 
-        torch.cumsum(query_lens_tensor,
-                     dim=0,
-                     dtype=query_start_loc.dtype,
-                     out=query_start_loc[1:])
+            torch.cumsum(query_lens_tensor,
+                        dim=0,
+                        dtype=query_start_loc.dtype,
+                        out=query_start_loc[1:])
+        else:
+            context_lens_tensor = context_lens
+            query_start_loc = query_lens
 
         # Generate attn_metadata
         attn_metadata = self.attn_backend.make_metadata(

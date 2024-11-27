@@ -113,9 +113,9 @@ class IpexAttnMetadata(AttentionMetadata, PagedAttentionMetadata):
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             # max_query_len=self.max_query_len,
             max_decode_seq_len=0,
-            query_start_loc=self.query_start_loc[:self.num_prefills + 1],
+            query_start_loc=self.query_start_loc[:self.num_prefills + 1] if (torch.is_tensor(self.query_start_loc)) else None,
             # seq_start_loc=None,
-            context_lens=self.context_lens[:self.num_prefills],
+            context_lens=self.context_lens[:self.num_prefills] if (torch.is_tensor(self.context_lens)) else None,
             block_tables=self.block_tables[:self.num_prefills],
         )
         return self._cached_prefill_metadata
