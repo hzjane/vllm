@@ -157,10 +157,6 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         if len(self.seq_group_metadata_list) == 0:
             return None
 
-        assert (self.sliding_window is not None and
-                not (self.scheduler_config.chunked_prefill_enabled and self.cache_config.enable_prefix_caching)), \
-            "Prefix caching is not supported with sliding window"
-
         for seq_group_metadata in self.seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             # is_prompt indicates that it is still in prompt states
