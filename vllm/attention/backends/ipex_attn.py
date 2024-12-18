@@ -214,9 +214,9 @@ def use_sdp_causal(head_dim, query_states):
         and query_states.dtype in [torch.float, torch.half]     # fp32/fp16
     )
 
-def use_gqa_kernel(num_heads, num_kv_heads):
+def use_gqa_kernel(num_heads, num_kv_heads, head_size):
     kv_cache_format = os.environ.get('USE_VLLM_KVCACHE')
-    if kv_cache_format is None and num_heads != num_kv_heads:
+    if kv_cache_format is None and num_heads != num_kv_heads and head_size in [128, 96, 80, 64]:
         return True
     else:
         return False
@@ -238,8 +238,6 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         if blocksparse_params is not None:
             raise ValueError(
                 "IPEX backend does not support block-sparse attention.")
-        if logits_soft_cap is not None:
-            raise ValueError("IPEX backend does not support logits_soft_cap.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -254,6 +252,9 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.need_mask = (self.alibi_slopes is not None
                           or self.sliding_window is not None)
+        if logits_soft_cap is None:
+            logits_soft_cap = 0
+        self.logits_soft_cap = logits_soft_cap
 
         supported_head_sizes = PagedAttention.get_supported_head_sizes()
         if head_size not in supported_head_sizes:
@@ -333,8 +334,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        using_gqa_kernel = use_gqa_kernel(self.num_heads, self.num_kv_heads)
-
+        using_gqa_kernel = use_gqa_kernel(self.num_heads, self.num_kv_heads, self.head_size)
         if kv_cache is not None:
             if using_gqa_kernel:
                 key_cache, value_cache = self.split_kv_cache_ipexllm(
@@ -439,13 +439,23 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                         import xe_addons
                         if mask is not None:
                             mask = mask.unsqueeze(0)
-                        sub_out = xe_addons.sdp_causal(
-                            query[None, :, start:end, :].contiguous(),
-                            key[None, :, start:end, :].contiguous(),
-                            value[None, :, start:end, :].contiguous(),
-                            mask,
-                            scale).squeeze(0).movedim(
-                                query.dim() - 2, 0)
+                        if self.logits_soft_cap == 0:
+                            sub_out = xe_addons.sdp_causal(
+                                query[None, :, start:end, :].contiguous(),
+                                key[None, :, start:end, :].contiguous(),
+                                value[None, :, start:end, :].contiguous(),
+                                mask,
+                                scale).squeeze(0).movedim(
+                                    query.dim() - 2, 0)
+                        else:
+                            sub_out = xe_addons.gemma2_sdp_causal(
+                                query[None, :, start:end, :].contiguous(),
+                                key[None, :, start:end, :].contiguous(),
+                                value[None, :, start:end, :].contiguous(),
+                                mask,
+                                self.logits_soft_cap,
+                                self.scale).squeeze(0).movedim(
+                                    query.dim() - 2, 0)                            
                     else:
                         sub_out = torch.nn.functional.scaled_dot_product_attention(
                             query[None, :, start:end, :],
@@ -496,6 +506,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
 
             bsz = len(decode_meta.seq_lens)
             import vllm._C.ops
+
             if using_gqa_kernel:
                 block_size = value_cache.shape[2]
                 vllm._C.ops.paged_attention_gqa(
@@ -534,6 +545,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                         self.kv_cache_dtype,
                         k_scale,
                         v_scale,
+                        self.logits_soft_cap,
                     )
                 else:
                     # Run PagedAttention V2.
@@ -567,6 +579,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                         self.kv_cache_dtype,
                         k_scale,
                         v_scale,
+                        self.logits_soft_cap,
                     )
             output[num_prefill_tokens:] = out
 
