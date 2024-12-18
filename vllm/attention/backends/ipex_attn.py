@@ -253,7 +253,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         self.need_mask = (self.alibi_slopes is not None
                           or self.sliding_window is not None)
         if logits_soft_cap is None:
-            logits_soft_cap = 0
+            logits_soft_cap = 0.0
         self.logits_soft_cap = logits_soft_cap
 
         supported_head_sizes = PagedAttention.get_supported_head_sizes()
