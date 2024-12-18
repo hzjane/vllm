@@ -1439,11 +1439,7 @@ void paged_attention_kernel(
           (alibi_slope != 0) ? alibi_slope * (token_idx - context_len + 1) : 0;
 
       // Add the attn_logit_softcapp if given.
-      //float attn_logit_softcapping = 50.0;
       if (attn_logit_softcapping != 0.0) {
-          // qk = qk / attn_logit_softcapping;
-          // qk = (sycl::exp(qk) - sycl::exp(-qk)) / (sycl::exp(qk) + sycl::exp(-qk));
-          // qk = qk * attn_logit_softcapping;
           qk = attn_softcapping(qk, attn_logit_softcapping);
       }
       if (thread_group_offset == 0) {
