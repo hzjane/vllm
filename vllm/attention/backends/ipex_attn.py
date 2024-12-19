@@ -207,10 +207,11 @@ def _make_attention_mask(
     return mask
 
 
-def use_sdp_causal(head_dim, query_states):
+def use_sdp_causal(head_dim, query_states, logits_soft_cap):
     return (
-        head_dim in [-1, 64, 80, 96, 128]           # for now
-        and query_states.device.type == "xpu"       # GPU
+        (logits_soft_cap != 0                        # for gemma model 
+        or head_dim in [-1, 64, 80, 96, 128])        # for now
+        and query_states.device.type == "xpu"        # GPU
         and query_states.dtype in [torch.float, torch.half]     # fp32/fp16
     )
 
@@ -435,7 +436,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                 for seq_len, mask in zip(prefill_meta.seq_lens,
                                         prefill_meta.attn_bias):
                     end = start + seq_len
-                    if self.alibi_slopes is None and use_sdp_causal(self.head_size, query):
+                    if self.alibi_slopes is None and use_sdp_causal(self.head_size, query, self.logits_soft_cap):
                         import xe_addons
                         if mask is not None:
                             mask = mask.unsqueeze(0)
