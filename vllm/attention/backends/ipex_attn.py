@@ -215,9 +215,9 @@ def use_sdp_causal(head_dim, query_states, logits_soft_cap):
         and query_states.dtype in [torch.float, torch.half]     # fp32/fp16
     )
 
-def use_gqa_kernel(num_heads, num_kv_heads, head_size):
+def use_gqa_kernel(num_heads, num_kv_heads, head_size, logits_soft_cap):
     kv_cache_format = os.environ.get('USE_VLLM_KVCACHE')
-    if kv_cache_format is None and num_heads != num_kv_heads and head_size in [128, 96, 80, 64]:
+    if kv_cache_format is None and num_heads != num_kv_heads and head_size in [128, 96, 80, 64] and logits_soft_cap == 0:
         return True
     else:
         return False
@@ -335,7 +335,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        using_gqa_kernel = use_gqa_kernel(self.num_heads, self.num_kv_heads, self.head_size)
+        using_gqa_kernel = use_gqa_kernel(self.num_heads, self.num_kv_heads, self.head_size, self.logits_soft_cap)
         if kv_cache is not None:
             if using_gqa_kernel:
                 key_cache, value_cache = self.split_kv_cache_ipexllm(
