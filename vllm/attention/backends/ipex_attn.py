@@ -440,7 +440,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                         import xe_addons
                         if mask is not None:
                             mask = mask.unsqueeze(0)
-                        if self.logits_soft_cap == 0:
+                        if self.logits_soft_cap == 0 or self.head_size != 256:
                             sub_out = xe_addons.sdp_causal(
                                 query[None, :, start:end, :].contiguous(),
                                 key[None, :, start:end, :].contiguous(),
