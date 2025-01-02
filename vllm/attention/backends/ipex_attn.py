@@ -430,7 +430,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                 key = key.movedim(0, key.dim() - 2)
                 value = value.movedim(0, value.dim() - 2)
                 import math
-                scale = 1 / math.sqrt(self.head_size)
+                scale = 1 / math.sqrt(self.head_size) if self.scale is None else self.scale
                 start = 0
                 for seq_len, mask in zip(prefill_meta.seq_lens,
                                         prefill_meta.attn_bias):
