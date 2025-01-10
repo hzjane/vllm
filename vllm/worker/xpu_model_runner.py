@@ -3,8 +3,8 @@ import time
 import weakref
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    Type, TypeVar)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
+                    Tuple, Type, TypeVar)
 
 import torch
 import torch.nn as nn
@@ -14,10 +14,15 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
+from vllm.lora.layers import LoRAMapping
+from vllm.lora.request import LoRARequest
+from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadataCache
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+from vllm.model_executor.models.interfaces import (supports_lora,
+                                                   supports_multimodal)
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap,
                              MultiModalRegistry)
@@ -39,6 +44,11 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = -1
+LORA_WARMUP_RANK = 8
+_BATCH_SIZE_ALIGNMENT = 8
+_BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
+    _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
+]
 
 TModelInputForXPU = TypeVar('TModelInputForXPU', bound="ModelInputForXPU")
 
@@ -50,6 +60,8 @@ class ModelInputForXPU(ModelRunnerInputBase):
     """
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
+    lora_mapping: Optional["LoRAMapping"] = None
+    lora_requests: Optional[Set[LoRARequest]] = None
     attn_metadata: Optional["AttentionMetadata"] = None
     multi_modal_kwargs: Optional[BatchedTensorInputs] = None
     virtual_engine: Optional[int] = None
@@ -371,7 +383,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int],
-               BatchedTensorInputs]:
+               BatchedTensorInputs, List[int], List[int], Set[LoRARequest]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
@@ -381,6 +393,9 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         multi_modal_placeholder_maps: Dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
+        lora_index_mapping: List[int] = []
+        lora_prompt_mapping: List[int] = []
+        lora_requests: Set[LoRARequest] = set()
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -404,36 +419,10 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             if mm_data:
                 mm_kwargs = self.multi_modal_input_mapper(mm_data)
                 multi_modal_kwargs_list.append(mm_kwargs)
-            if self.runner.model_is_mrope and mm_data:
-                image_grid_thw = mm_kwargs.get("image_grid_thw", None)
-                video_grid_thw = mm_kwargs.get("video_grid_thw", None)
-                assert image_grid_thw is not None or video_grid_thw is not None, (
-                    "mrope embedding type requires multi-modal input mapper "
-                    "returns 'image_grid_thw' or 'video_grid_thw'.")
 
-                hf_config = self.runner.model_config.hf_config
-                token_ids = seq_data.get_token_ids()
-                temp_mrope_input_positions, mrope_position_delta = \
-                    MRotaryEmbedding.get_input_positions(
-                        token_ids,
-                        image_grid_thw=image_grid_thw,
-                        video_grid_thw=video_grid_thw,
-                        image_token_id=hf_config.image_token_id,
-                        video_token_id=hf_config.video_token_id,
-                        vision_start_token_id=hf_config.vision_start_token_id,
-                        vision_end_token_id=hf_config.vision_end_token_id,
-                        spatial_merge_size=hf_config.vision_config.spatial_merge_size,
-                        context_len=0,
-                    )
-                seq_data.mrope_position_delta = mrope_position_delta
-                mrope_input_positions = [[] for _ in range(3)]
-                for idx in range(3):
-                    # msections = temp_mrope_input_positions
-                    # for _seq_mrope_input_positions in msections:
-                    mrope_input_positions[idx].extend(
-                        temp_mrope_input_positions[idx])
-                input_positions = mrope_input_positions
-
+                for modality, placeholder_map in placeholder_maps.items():
+                    multi_modal_placeholder_maps[modality].extend(
+                        placeholder_map)
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -503,24 +492,33 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
 
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
         return (input_tokens, input_positions, attn_metadata, seq_lens,
-                multi_modal_kwargs)
+                multi_modal_kwargs, lora_index_mapping, lora_prompt_mapping,
+                lora_requests)
 
     def _prepare_decode(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int],
+               List[int], Set[LoRARequest]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
         block_tables: List[List[int]] = []
+        lora_index_mapping: List[int] = []
+        lora_prompt_mapping: List[int] = []
+        lora_requests: Set[LoRARequest] = set()
 
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
             assert seq_group_metadata.token_chunk_size == 1
 
             seq_ids = list(seq_group_metadata.seq_data.keys())
+            lora_id = seq_group_metadata.lora_int_id
+
+            if lora_id > 0:
+                lora_requests.add(seq_group_metadata.lora_request)
 
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
@@ -540,6 +538,8 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
+                lora_index_mapping.append(lora_id)
+                lora_prompt_mapping.append(lora_id)
 
                 if self.sliding_window is not None:
                     sliding_window_blocks = (self.sliding_window //
@@ -583,11 +583,8 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             num_prefills=0,
             block_tables=block_tables,
         )
-        return (
-            input_tokens,
-            input_positions,
-            attn_metadata,
-        )
+        return (input_tokens, input_positions, attn_metadata,
+                lora_index_mapping, lora_prompt_mapping, lora_requests)
 
 
 class XPUModelRunnerBase(ModelRunnerBase[TModelInputForXPU]):
@@ -634,6 +631,8 @@ class XPUModelRunnerBase(ModelRunnerBase[TModelInputForXPU]):
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
+        # Set after load_model.
+        self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
         self.sampling_metadata_cache: SamplingMetadataCache = \
               SamplingMetadataCache() \
@@ -646,6 +645,25 @@ class XPUModelRunnerBase(ModelRunnerBase[TModelInputForXPU]):
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
+
+        if self.lora_config:
+            assert supports_lora(self.model), "Model does not support LoRA"
+            assert not supports_multimodal(
+                self.model
+            ), "To be tested: Multi-modal model with LoRA settings."
+
+            self.lora_manager = LRUCacheWorkerLoRAManager(
+                self.scheduler_config.max_num_seqs,
+                self.scheduler_config.max_num_batched_tokens,
+                self.vocab_size,
+                self.lora_config,
+                self.device,
+                self.model.embedding_modules,
+                self.model.embedding_padding_modules,
+                max_position_embeddings=self.model.config.
+                max_position_embeddings,
+            )
+            self.model = self.lora_manager.create_lora_manager(self.model)
 
     @property
     def vocab_size(self) -> int:
@@ -666,6 +684,30 @@ class XPUModelRunnerBase(ModelRunnerBase[TModelInputForXPU]):
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         max_num_seqs = self.scheduler_config.max_num_seqs
+
+        # This represents the maximum number of different requests
+        # that will have unique loras, an therefore the max amount of memory
+        # consumption create dummy lora request copies from the lora request
+        # passed in, which contains a lora from the lora warmup path.
+        dummy_lora_requests: List[LoRARequest] = []
+        dummy_lora_requests_per_seq: List[LoRARequest] = []
+        if self.lora_config:
+            assert self.lora_manager is not None
+            with self.lora_manager.dummy_lora_cache():
+                for idx in range(self.lora_config.max_loras):
+                    lora_id = idx + 1
+                    dummy_lora_request = LoRARequest(
+                        lora_name=f"warmup_{lora_id}",
+                        lora_int_id=lora_id,
+                        lora_path="/not/a/real/path",
+                    )
+                    self.lora_manager.add_dummy_lora(dummy_lora_request,
+                                                     rank=LORA_WARMUP_RANK)
+                    dummy_lora_requests.append(dummy_lora_request)
+                dummy_lora_requests_per_seq = [
+                    dummy_lora_requests[idx % len(dummy_lora_requests)]
+                    for idx in range(max_num_seqs)
+                ]
 
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
@@ -707,7 +749,8 @@ class XPUModelRunnerBase(ModelRunnerBase[TModelInputForXPU]):
                 seq_data={group_id: dummy_data.seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
-                lora_request=None,
+                lora_request=dummy_lora_requests_per_seq[group_id]
+                if dummy_lora_requests_per_seq else None,
                 multi_modal_data=dummy_data.multi_modal_data,
                 multi_modal_placeholders=dummy_data.multi_modal_placeholders)
             seqs.append(seq)
@@ -827,6 +870,12 @@ class XPUModelRunner(XPUModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             raise ValueError(
                 "XPUModelRunner does not support multi-step execution.")
 
+        if self.lora_config:
+            assert model_input.lora_requests is not None
+            assert model_input.lora_mapping is not None
+            self.set_active_loras(model_input.lora_requests,
+                                  model_input.lora_mapping)
+
         model_executable = self.model
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
@@ -876,3 +925,9 @@ class XPUModelRunner(XPUModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             output.model_forward_time = model_forward_time
 
         return [output]
+
+    def set_active_loras(self, lora_requests: Set[LoRARequest],
+                         lora_mapping: LoRAMapping) -> None:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
