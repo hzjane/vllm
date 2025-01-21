@@ -116,9 +116,17 @@ def custom_histogram(indices, min, max):
 
 
 def custom_gmm(x, w, group_sizes):
-    x_groups = torch.split(x, group_sizes.tolist(), dim=0)
-    results = []
-    for i, x_group in enumerate(x_groups):
-        if x_group.size() != 0:
-            results.append(torch.matmul(x_group, w[i]))
-    return torch.cat(results, dim=0)
+    result = torch.zeros(
+            (x.shape[0], w.shape[-1]),
+            dtype=x.dtype,
+            device=x.device
+        )
+    start = 0
+    i = 0
+    for end_index in group_sizes.tolist():
+        if end_index > 0:
+            end = start + end_index
+            result[start:end] = torch.matmul(x[start:end], w[i])
+            start = end
+        i += 1
+    return result
