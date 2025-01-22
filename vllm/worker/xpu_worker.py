@@ -3,7 +3,8 @@ import gc
 import os
 from typing import List, Optional, Tuple
 
-import intel_extension_for_pytorch  # noqa: F401
+# import intel_extension_for_pytorch  # noqa: F401
+# TODO: handle case for oneccl_bindings for dual cards
 import oneccl_bindings_for_pytorch  # noqa: F401
 import torch
 import torch.distributed
@@ -16,13 +17,13 @@ from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.worker import Worker
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
+from vllm.worker.worker_base import WorkerBase
 from vllm.worker.xpu_model_runner import XPUModelRunner
 
 logger = init_logger(__name__)
 
 
-class XPUWorker(LoraNotSupportedWorkerBase, Worker):
+class XPUWorker(Worker):
     """A worker class that executes (a partition of) the model on a GPU.
     
     Each worker is associated with a single XPU device. The worker is 
@@ -196,3 +197,4 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
             # torch-ccl xpu need a collective API warm up
             # before calling send/recv API
             get_pp_group().all_gather(torch.zeros(1).xpu())
+
