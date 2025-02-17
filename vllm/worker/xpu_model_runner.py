@@ -240,6 +240,9 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                     mm_data = seq_group_metadata.multi_modal_data
                     if mm_data and not self.runner.model_is_mrope:
                         mm_kwargs = self.multi_modal_input_mapper(mm_data)
+                    else:
+                        mm_kwargs = mm_data
+                    if mm_kwargs is not None:
                         multi_modal_kwargs_list.append(mm_kwargs)
                     if self.runner.model_is_mrope and mm_data:
                         mm_kwargs = mm_data
