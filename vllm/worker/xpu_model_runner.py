@@ -245,7 +245,6 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                     if mm_kwargs is not None:
                         multi_modal_kwargs_list.append(mm_kwargs)
                     if self.runner.model_is_mrope and mm_data:
-                        mm_kwargs = mm_data
                         image_grid_thw = mm_kwargs.get("image_grid_thw", None)
                         video_grid_thw = mm_kwargs.get("video_grid_thw", None)
                         assert image_grid_thw is not None or video_grid_thw is not None, (
