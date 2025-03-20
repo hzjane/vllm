@@ -39,8 +39,9 @@ class _Backend(enum.Enum):
     HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
     PALLAS_VLLM_V1 = enum.auto()
-    IPEX = enum.auto()
     BLOCK_SPARSE_FLASH_ATTN = enum.auto()
+    IPEX = enum.auto()
+    IPEX_V1 = enum.auto()
     NO_ATTENTION = enum.auto()
 
 
@@ -129,6 +130,9 @@ class Platform:
 
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
+    
+    def is_xpu(self) -> bool:
+        return self._enum == PlatformEnum.XPU
 
     def is_neuron(self) -> bool:
         return self._enum == PlatformEnum.NEURON

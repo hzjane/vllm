@@ -346,6 +346,7 @@ class InputPreprocessor:
             tokens_content = parsed["content"]
 
             prompt_token_ids = tokens_content["prompt_token_ids"]
+            prompt = tokens_content["prompt"] if "prompt" in tokens_content else ""
             token_type_ids = tokens_content.get("token_type_ids")
             multi_modal_data = tokens_content.get("multi_modal_data")
             mm_processor_kwargs = tokens_content.get("mm_processor_kwargs")
@@ -361,6 +362,7 @@ class InputPreprocessor:
 
             return token_inputs(
                 prompt_token_ids=prompt_token_ids,
+                prompt=prompt,
                 token_type_ids=token_type_ids,
                 multi_modal_data=multi_modal_data,
                 mm_processor_kwargs=mm_processor_kwargs,

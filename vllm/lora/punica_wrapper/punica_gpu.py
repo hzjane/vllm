@@ -12,10 +12,14 @@ import torch
 
 from vllm.lora.layers import LoRAMapping
 from vllm.triton_utils import HAS_TRITON
+from vllm.platforms import current_platform
 
-if HAS_TRITON:
+if HAS_TRITON and not current_platform.is_xpu():
     from vllm.lora.ops.triton_ops import (LoRAKernelMeta, lora_expand,
                                           lora_shrink)
+elif current_platform.is_xpu():
+    # TODO(xiangyu): check here
+    pass
 
 from .punica_base import PunicaWrapperBase
 

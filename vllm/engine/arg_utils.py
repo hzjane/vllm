@@ -117,8 +117,8 @@ class EngineArgs:
     tensor_parallel_size: int = 1
     enable_expert_parallel: bool = False
     max_parallel_loading_workers: Optional[int] = None
-    block_size: Optional[int] = None
-    enable_prefix_caching: Optional[bool] = None
+    block_size: int = 8
+    enable_prefix_caching: bool = False
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
@@ -219,6 +219,8 @@ class EngineArgs:
     enable_reasoning: Optional[bool] = None
     reasoning_parser: Optional[str] = None
     use_tqdm_on_load: bool = True
+    low_bit_model_path: Optional[str] = None
+    low_bit_save_path: Optional[str] = None
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -1096,6 +1098,18 @@ class EngineArgs:
             "using. This is used to parse the reasoning content into OpenAI "
             "API format. Required for ``--enable-reasoning``.")
 
+        parser.add_argument(
+            "--low-bit-model-path",
+            type=nullable_str,
+            default=None,
+            help="Path for Low-bit loader")
+
+        parser.add_argument(
+            "--low-bit-save-path",
+            type=nullable_str,
+            default=None,
+            help="Path for Low-bit saver")
+
         return parser
 
     @classmethod
@@ -1155,6 +1169,8 @@ class EngineArgs:
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
+            low_bit_model_path=self.low_bit_model_path,
+            low_bit_save_path=self.low_bit_save_path,
         )
 
     def create_load_config(self) -> LoadConfig:

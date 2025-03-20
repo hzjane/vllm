@@ -81,12 +81,34 @@ endif()
 find_package(Torch REQUIRED)
 
 #
+message(STATUS "Enabling core extension.")
+
+# # Define _core_C extension
+# #  built for (almost) every target platform, (excludes TPU and Neuron)
+
+# set(VLLM_EXT_SRC
+#   "csrc/core/torch_bindings.cpp")
+
+# define_gpu_extension_target(
+#   _core_C
+#   DESTINATION vllm
+#   LANGUAGE CXX
+#   SOURCES ${VLLM_EXT_SRC}
+#   COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
+#   USE_SABI 3
+#   WITH_SOABI)
+
+#
 # Forward the non-CUDA device extensions to external CMake scripts.
 #
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
     NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
     if (VLLM_TARGET_DEVICE STREQUAL "cpu")
         include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
+    elseif(VLLM_TARGET_DEVICE STREQUAL "xpu")
+        message(STATUS "Building XPU")
+        set(VLLM_GPU_LANG "SYCL")
+        include(${CMAKE_CURRENT_LIST_DIR}/cmake/xpu_extension.cmake)
     else()
         return()
     endif()

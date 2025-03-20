@@ -35,7 +35,8 @@ from typing import Optional
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
+from ipex_llm.vllm.xpu.engine import IPEXLLMClass as LLM
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
@@ -192,7 +193,7 @@ def main(args):
 
     engine_args = EngineArgs.from_cli_args(args)
 
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM(**dataclasses.asdict(engine_args), load_in_low_bit=args.load_in_low_bit)
 
     sampling_params = SamplingParams(temperature=0,
                                      max_tokens=args.output_len,
@@ -251,6 +252,13 @@ if __name__ == "__main__":
         help=("Do not detokenize responses (i.e. do not include "
               "detokenization time in the latency measurement)"),
     )
+
+    parser.add_argument(
+        "--load-in-low-bit",
+        type=str,
+        choices=["sym_int4", "fp8", "fp8_e4m3", "fp16", "fp6"],
+        default="sym_int4",
+        help="Low-bit format quantization with IPEX-LLM")
 
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()

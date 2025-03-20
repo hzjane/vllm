@@ -91,6 +91,9 @@ class FlashAttentionMetadata:
     prefix_kv_lens: Optional[torch.Tensor]
     suffix_kv_lens: Optional[torch.Tensor]
 
+    context_lens: Optional[torch.Tensor]
+    seq_lens: Optional[torch.Tensor]
+
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
 
@@ -392,6 +395,7 @@ def cascade_attention(
     common_prefix_len: int,
     fa_version: int,
 ) -> torch.Tensor:
+
     assert alibi_slopes is None, ("Cascade attention does not support ALiBi.")
     # TODO: Support sliding window.
     assert sliding_window == (-1, -1), (

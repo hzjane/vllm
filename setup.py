@@ -26,7 +26,7 @@ def load_module_from_path(module_name, path):
     spec.loader.exec_module(module)
     return module
 
-
+os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = "0.8.1+ipexllm"
 ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
 
@@ -147,6 +147,7 @@ class cmake_build_ext(build_ext):
         cmake_args = [
             '-DCMAKE_BUILD_TYPE={}'.format(cfg),
             '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
+            "-DCMAKE_CXX_STANDARD=17",
         ]
 
         verbose = envs.VERBOSE
@@ -429,7 +430,7 @@ def _no_device() -> bool:
 def _is_cuda() -> bool:
     has_cuda = torch.version.cuda is not None
     return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
-            and not (_is_neuron() or _is_tpu() or _is_hpu()))
+            and not (_is_neuron() or _is_tpu() or _is_xpu()))
 
 
 def _is_hip() -> bool:
@@ -458,7 +459,11 @@ def _is_xpu() -> bool:
 
 
 def _build_custom_ops() -> bool:
-    return _is_cuda() or _is_hip() or _is_cpu()
+    return _is_cuda() or _is_hip() or _is_cpu() or _is_xpu()
+
+
+def _build_core_ext() -> bool:
+    return not (_is_neuron() or _is_tpu() or _is_openvino() or _is_xpu())
 
 
 def get_rocm_version():
@@ -639,6 +644,9 @@ def get_requirements() -> list[str]:
 
 
 ext_modules = []
+
+if _build_core_ext():
+    ext_modules.append(CMakeExtension(name="vllm._core_C"))
 
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))

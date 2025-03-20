@@ -146,6 +146,8 @@ class Resampler2_5(BaseResampler):
         self.max_size = max_size
         self._set_2d_pos_cache(self.max_size)
 
+        #self.apply(self._init_weights)
+
     def _set_2d_pos_cache(self,
                           max_size: Tuple[int, int],
                           device: torch.types.Device = "cpu") -> None:
@@ -1336,11 +1338,15 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
         for i in range(B):
             patch_attn_mask[i, :tgt_sizes[i][0] * tgt_sizes[i][1]] = True
 
-        return self.get_vision_embedding(all_pixel_values.type(dtype),
-                                         patch_attn_mask, tgt_sizes)
+        return self.get_vision_embedding(all_pixel_values.type(dtype).to(device),
+                                         patch_attn_mask, tgt_sizes.to(device))
+
+    def is_default_weight_loading(self, name: str) -> bool:
+        return "resampler" in name
 
 
-class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
+class MiniCPMV2_6(MiniCPMVBaseModel):
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1433,9 +1439,9 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         for i in range(B):
             patch_attn_mask[i, 0, :tgt_sizes[i][0] * tgt_sizes[i][1]] = True
         vision_embedding = self.vpm(
-            all_pixel_values.type(dtype),
+            all_pixel_values.type(dtype).to(device),
             patch_attention_mask=patch_attn_mask,
-            tgt_sizes=tgt_sizes,
+            tgt_sizes=tgt_sizes.to(device),
         )
 
         return self.resampler(vision_embedding, tgt_sizes)

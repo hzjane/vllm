@@ -129,12 +129,14 @@ class GLMMLP(nn.Module):
     def __init__(
         self,
         config: ChatGLMConfig,
+        layer,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
         super().__init__()
 
         self.add_bias = config.add_bias_linear
+        self.layer = layer
 
         # Project to 4h.
         self.dense_h_to_4h = MergedColumnParallelLinear(
@@ -159,7 +161,14 @@ class GLMMLP(nn.Module):
     def forward(self, hidden_states):
         # [s, b, 4hp]
         intermediate_parallel, _ = self.dense_h_to_4h(hidden_states)
-        intermediate_parallel = self.activation_func(intermediate_parallel)
+        # IPEX-LLM changes start: workaround fp16 overflow
+        if self.layer >= 38 and intermediate_parallel.device.type == "xpu":
+            d = intermediate_parallel.shape[-1] // 2
+            intermediate_parallel[..., d:] /= 10
+            intermediate_parallel = self.activation_func(intermediate_parallel)
+        else:
+            intermediate_parallel = self.activation_func(intermediate_parallel)
+        # IPEX-LLM changes end.
         # [s, b, h]
         output, _ = self.dense_4h_to_h(intermediate_parallel)
         return output
@@ -175,6 +184,7 @@ class GLMBlock(nn.Module):
     def __init__(
         self,
         config: ChatGLMConfig,
+        layer,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -234,8 +244,13 @@ class GLMBlock(nn.Module):
             residual = layernorm_output
         else:
             residual = layernorm_input
-
-        output = self.mlp(layernorm_output) + residual
+        # IPEX-LLM changes start: workaround fp16 overflow
+        if self.layer >= 38 and layernorm_output.device.type == "xpu":
+            output = self.mlp(layernorm_output) * 10 + residual
+            output = torch.nan_to_num(output)
+        else:
+            output = self.mlp(layernorm_output) + residual
+        # ipex-llm changes end
 
         return output
 
@@ -257,12 +272,15 @@ class GLMTransformer(nn.Module):
         self.num_layers = config.num_layers
 
         # Transformer layers.
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            self.num_layers,
-            lambda prefix: GLMBlock(
-                config, cache_config, quant_config, prefix=prefix),
-            prefix=f"{prefix}.layers",
-        )
+        # Not sure if pp is available now
+        from vllm.distributed.utils import get_pp_indices
+        self.start_layer, self.end_layer = get_pp_indices(self.num_layers,
+                                                get_pp_group().rank_in_group,
+                                                get_pp_group().world_size)
+        self.layers = nn.ModuleList([
+            GLMBlock(config, i, cache_config, quant_config, prefix=f"{prefix}.layers.{i}")
+            for i in range(self.start_layer, self.end_layer)
+        ])
 
         if self.post_layer_norm:
             layer_norm_func = RMSNorm if config.rmsnorm else LayerNorm

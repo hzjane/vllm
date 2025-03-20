@@ -261,6 +261,8 @@ class ModelConfig:
         enable_sleep_mode: bool = False,
         override_generation_config: Optional[dict[str, Any]] = None,
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
+        low_bit_model_path: Optional[str] = None,
+        low_bit_save_path: Optional[str] = None,
     ) -> None:
         self.model = model
         self.hf_config_path = hf_config_path
@@ -274,6 +276,8 @@ class ModelConfig:
         self.rope_scaling = rope_scaling
         self.rope_theta = rope_theta
         self.model_impl = model_impl
+        self.low_bit_model_path = low_bit_model_path
+        self.low_bit_save_path = low_bit_save_path
 
         if hf_overrides is None:
             hf_overrides = {}
@@ -1309,6 +1313,7 @@ class LoadConfig:
     """
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
+    use_low_bit_loader: bool = False
     download_dir: Optional[str] = None
     model_loader_extra_config: Optional[Union[str, dict]] = field(
         default_factory=dict)
@@ -3405,7 +3410,7 @@ class VllmConfig:
             quant_config = get_quant_config(model_config, load_config)
             capability_tuple = current_platform.get_device_capability()
 
-            if capability_tuple is not None:
+            if capability_tuple is not None and not current_platform.is_xpu():
                 capability = capability_tuple.to_int()
                 if capability < quant_config.get_min_capability():
                     raise ValueError(
