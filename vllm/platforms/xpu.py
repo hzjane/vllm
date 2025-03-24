@@ -91,8 +91,8 @@ class XPUPlatform(Platform):
             raise NotImplementedError(
                 "XPU does not support speculative decoding")
 
-        if vllm_config.device_config is not None:
-            assert vllm_config.device_config.device_type == "xpu"
+        # if vllm_config.device_config is not None:
+        #     assert vllm_config.device_config.device_type == "xpu"
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config

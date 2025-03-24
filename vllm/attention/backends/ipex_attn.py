@@ -152,6 +152,7 @@ class IpexAttnMetadata(AttentionMetadata, PagedAttentionMetadata):
             # seq_start_loc=None,
             context_lens=self.context_lens[self.num_prefills:] if (torch.is_tensor(self.context_lens)) else None,
             block_tables=self.block_tables[self.num_prefills:],
+            enable_kv_scales_calculation=False,
         )
         return self._cached_decode_metadata
     
