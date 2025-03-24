@@ -91,9 +91,6 @@ class FlashAttentionMetadata:
     prefix_kv_lens: Optional[torch.Tensor]
     suffix_kv_lens: Optional[torch.Tensor]
 
-    context_lens: Optional[torch.Tensor]
-    seq_lens: Optional[torch.Tensor]
-
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
 

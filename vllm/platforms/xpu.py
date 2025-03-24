@@ -36,8 +36,10 @@ class XPUPlatform(Platform):
             logger.info("Cannot use %s backend on XPU.", selected_backend)
         use_v1 = envs.VLLM_USE_V1
         if use_v1:
-            return "vllm.v1.attention.backends.ipex_attn.IpexAttnBackend"
+            logger.info("Using IPEX_V1 attention backend.")
+            return "vllm.v1.attention.backends.ipex_attn.IPEXAttentionBackend"
         else:
+            logger.info("Using IPEX attention backend.")
             return "vllm.attention.backends.ipex_attn.IpexAttnBackend"
 
     @staticmethod
@@ -67,6 +69,8 @@ class XPUPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
+        if cache_config and envs.VLLM_USE_V1:
+            cache_config.block_size = 64
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
 
@@ -98,18 +102,26 @@ class XPUPlatform(Platform):
         parallel_config = vllm_config.parallel_config
 
         # TODO(xiangyu): check logic here
+
+        if envs.VLLM_USE_V1:
+            parallel_config.worker_cls = \
+                        "vllm.v1.worker.xpu_worker.XPUWorker"
+        else:
+            parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
+
         if parallel_config.distributed_executor_backend is None:
-            parallel_config.distributed_executor_backend = "ray"
+            if parallel_config.world_size > 1:
+                parallel_config.distributed_executor_backend = "ray"
+            else:
+                parallel_config.distributed_executor_backend = "uni"
         elif parallel_config.distributed_executor_backend == "mp":
             # FIXME(kunshang):
             # spawn needs calling `if __name__ == '__main__':``
             # fork is not supported for xpu start new process.
-            logger.error(
-                "Both start methods (spawn and fork) have issue "
-                "on XPU if you use mp backend, setting it to ray instead.")
-            parallel_config.distributed_executor_backend = "ray"
-
-        elif parallel_config.distributed_executor_backend != "ray":
+            logger.warning(
+                "Please use spawn as start method if you want to use mp.")
+        elif parallel_config.distributed_executor_backend != "ray" and \
+                parallel_config.distributed_executor_backend != "uni":
             logger.warning(
                 "%s is not supported on XPU, fallback to ray distributed"
                 " executor backend.",
@@ -122,12 +134,7 @@ class XPUPlatform(Platform):
         #         " executor backend.",
         #         parallel_config.distributed_executor_backend)
         #     parallel_config.distributed_executor_backend = "ray"
-        if parallel_config.worker_cls == "auto":
-            if envs.VLLM_USE_V1:
-                parallel_config.worker_cls = \
-                            "vllm.v1.worker.xpu_worker.XPUWorker"
-            else:
-                parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
+        
 
     @classmethod
     def is_pin_memory_available(cls):

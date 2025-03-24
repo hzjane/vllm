@@ -1,21 +1,28 @@
-from typing import TYPE_CHECKING, Dict, List
+# SPDX-License-Identifier: Apache-2.0
+import gc
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.inputs import INPUT_REGISTRY
+from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
                         is_pin_memory_available)
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.v1.attention.backends.ipex_attn import IPEXAttentionBackend
-from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
+from vllm.v1.attention.backends.ipex_attn import (IPEXAttentionBackend,
+                                                  IPEXAttentionMetadata)
+from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
+from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
+
+logger = init_logger(__name__)
 
 
 class XPUModelRunner(GPUModelRunner):
@@ -70,27 +77,25 @@ class XPUModelRunner(GPUModelRunner):
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
+        # FIXME: support mrope
+        self.uses_mrope = False
 
-        # NOTE: mm_input_mapper_client and mm_hasher are only used for memory
-        # profiling.
-        self.mm_input_mapper_client = MMInputMapperClient(self.model_config)
-        self.mm_hasher = MMHasher()
-        self.use_hash = (not model_config.disable_mm_preprocessor_cache) or \
-            cache_config.enable_prefix_caching
-
-        self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  # noqa: E501
-        self.encoder_cache_size = self.scheduler_config.encoder_cache_size
+        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
+            model_config=model_config,
+            scheduler_config=scheduler_config,
+        )
+        self.max_num_encoder_input_tokens = encoder_compute_budget
+        self.encoder_cache_size = encoder_cache_size
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
-        self.kv_caches: List[torch.Tensor] = []
+        self.kv_caches: list[torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
-        self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
-
+        self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
+        self.use_spec_decode = False
         # Request states.
-        self.requests: Dict[str, CachedRequestState] = {}
+        self.requests: dict[str, CachedRequestState] = {}
         # Persistent batch.
-        # It seems that each ModelRunner have a InputBatch
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -108,7 +113,8 @@ class XPUModelRunner(GPUModelRunner):
         # self.cudagraph_batch_sizes sorts in ascending order.
         # The batch sizes in the config are in descending order.
         self.cudagraph_batch_sizes = list(
-            reversed(self.vllm_config.compilation_config.capture_sizes))
+            reversed(
+                self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
         # Persistent buffers for CUDA graphs.
         self.input_ids = torch.zeros(self.max_num_tokens,
@@ -148,30 +154,30 @@ class XPUModelRunner(GPUModelRunner):
                                                dtype=torch.int32,
                                                device="cpu",
                                                pin_memory=self.pin_memory)
-        self.context_len_cpu = torch.zeros(self.max_num_reqs, dtype=torch.int32, device="cpu", pin_memory=self.pin_memory)
         self.query_start_loc_np = self.query_start_loc_cpu.numpy()
         self.seq_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
                                              dtype=torch.int32,
                                              device="cpu",
                                              pin_memory=self.pin_memory)
         self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
+        self.seq_lens_cpu = torch.zeros(self.max_num_reqs,
+                                        dtype=torch.int32,
+                                        device="cpu",
+                                        pin_memory=self.pin_memory)
+        self.seq_lens_np = self.seq_lens_cpu.numpy()
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
-        # Total scheduled tokens
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
-        # Num reqs
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
-        # It seems that the block table is stored in CPU at first...
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
-        # Scheduled tokens are stored in this, max is stored in max
         num_scheduled_tokens = []
         max_num_scheduled_tokens = 0
         for req_id in self.input_batch.req_ids[:num_reqs]:
@@ -236,13 +242,16 @@ class XPUModelRunner(GPUModelRunner):
         np.cumsum(num_scheduled_tokens,
                   out=self.query_start_loc_np[1:num_reqs + 1])
 
-        # Here we can get seq_lens
         seq_lens = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
                     num_scheduled_tokens)
-        context_lens = self.input_batch.num_computed_tokens_cpu[:num_reqs]
         max_seq_len = seq_lens.max()
         self.seq_start_loc_np[0] = 0
         np.cumsum(seq_lens, out=self.seq_start_loc_np[1:num_reqs + 1])
+
+        self.seq_lens_np[:num_reqs] = (
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] +
+            num_scheduled_tokens)
+        # max_seq_len = self.seq_lens_np[:num_reqs].max()
 
         # Copy the tensors to the GPU.
         self.input_ids[:total_num_scheduled_tokens].copy_(
@@ -253,6 +262,8 @@ class XPUModelRunner(GPUModelRunner):
             self.device, non_blocking=True)
         seq_start_loc = self.seq_start_loc_cpu[:num_reqs + 1].to(
             self.device, non_blocking=True)
+        seq_lens = self.seq_lens_cpu[:num_reqs].to(self.device,
+                                                   non_blocking=True)
         slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
             self.device, non_blocking=True).long()
 
@@ -266,36 +277,31 @@ class XPUModelRunner(GPUModelRunner):
                 [0, total_num_scheduled_tokens],
                 dtype=torch.int32,
                 device=self.device)
-            cu_prefix_kv_lens = torch.tensor([0, common_prefix_len],
-                                             dtype=torch.int32,
-                                             device=self.device)
-            cu_suffix_kv_lens = (
-                self.seq_start_loc_np[:num_reqs + 1] -
-                self.arange_np[:num_reqs + 1] * common_prefix_len)
-            cu_suffix_kv_lens = torch.from_numpy(cu_suffix_kv_lens).to(
-                self.device)
+            prefix_kv_lens = torch.tensor([common_prefix_len],
+                                          dtype=torch.int32,
+                                          device=self.device)
+            suffix_kv_lens = (self.seq_lens_np[:num_reqs] - common_prefix_len)
+            suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(self.device)
         else:
             cu_prefix_query_lens = None
-            cu_prefix_kv_lens = None
-            cu_suffix_kv_lens = None
+            prefix_kv_lens = None
+            suffix_kv_lens = None
 
-        # TODO(gc): remove this context_lens and seq_lens
-        attn_metadata = FlashAttentionMetadata(
+        attn_metadata = IPEXAttentionMetadata(
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
             seq_start_loc=seq_start_loc,
+            seq_lens=torch.empty(0, dtype=torch.int32, device=self.device),
             block_table=(
                 self.input_batch.block_table.get_device_tensor()[:num_reqs]),
             slot_mapping=slot_mapping,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
             cu_prefix_query_lens=cu_prefix_query_lens,
-            cu_prefix_kv_lens=cu_prefix_kv_lens,
-            cu_suffix_kv_lens=cu_suffix_kv_lens,
-            context_lens=None,
-            seq_lens=None,
+            prefix_kv_lens=prefix_kv_lens,
+            suffix_kv_lens=suffix_kv_lens,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
@@ -303,19 +309,47 @@ class XPUModelRunner(GPUModelRunner):
         # token from the partial request.
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
-        return attn_metadata, logits_indices
+        spec_decode_metadata = None
+        return attn_metadata, logits_indices, spec_decode_metadata
 
-    @torch.inference_mode()
     def profile_run(self) -> None:
-        # self._dummy_run(self.model, self.max_num_tokens)
+        # Trigger compilation for general shape.
+        hidden_states = self._dummy_run(self.max_num_tokens)
+        logits = self.model.compute_logits(hidden_states, None)
+        logits = logits[:self.max_num_tokens]
         torch.xpu.synchronize()
+        gc.collect()
 
-    def initialize_kv_cache(self, num_blocks: int) -> None:
-        assert len(self.kv_caches) == 0
-        kv_cache_shape = IPEXAttentionBackend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_kv_heads, self.head_size)
-        for _ in range(self.num_attn_layers):
-            self.kv_caches.append(
-                torch.zeros(kv_cache_shape,
-                            dtype=self.kv_cache_dtype,
-                            device=self.device))
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Initialize KV cache based on `kv_cache_config`.
+        Args:
+            kv_cache_config: Configuration for the KV cache, including the KV 
+            cache size of each layer
+        """
+        if len(kv_cache_config.groups) > 1:
+            raise NotImplementedError(
+                "Hybrid models with more than one KV cache type are not "
+                "supported yet.")
+
+        kv_caches: dict[str, torch.Tensor] = {}
+
+        for layer_name, layer_spec in kv_cache_config.kv_cache_spec.items():
+            tensor_config = kv_cache_config.tensors[layer_name]
+            assert tensor_config.size % layer_spec.page_size_bytes == 0
+            num_blocks = tensor_config.size // layer_spec.page_size_bytes
+            if isinstance(layer_spec, FullAttentionSpec):
+                kv_cache_shape = IPEXAttentionBackend.get_kv_cache_shape(
+                    num_blocks, layer_spec.block_size, layer_spec.num_kv_heads,
+                    layer_spec.head_size)
+                dtype = layer_spec.dtype
+                kv_caches[layer_name] = torch.zeros(kv_cache_shape,
+                                                    dtype=dtype,
+                                                    device=self.device)
+            else:
+                raise NotImplementedError
+
+        bind_kv_cache(
+            kv_caches,
+            self.vllm_config.compilation_config.static_forward_context,
+            self.kv_caches)

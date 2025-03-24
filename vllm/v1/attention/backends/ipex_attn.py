@@ -1,16 +1,21 @@
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
 from vllm._ipex_ops import ipex_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
+                                              AttentionMetadata, AttentionType, AttentionLayer)
 from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.attention.backends.ipex_attn import use_gqa_kernel
 import os
+
+@dataclass
+class IPEXAttentionMetadata(FlashAttentionMetadata):
+    seq_start_loc: torch.Tensor = torch.tensor([0], dtype=torch.int64)
 
 
 class IPEXAttentionBackend(AttentionBackend):
@@ -24,12 +29,12 @@ class IPEXAttentionBackend(AttentionBackend):
         return "IPEX_V1"
 
     @staticmethod
-    def get_impl_cls() -> Type["IPEXAttentionImpl"]:
-        return IPEXAttentionImpl
+    def get_impl_cls() -> Type["IPEXAttentionBackendImpl"]:
+        return IPEXAttentionBackendImpl
 
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
-        return FlashAttentionMetadata
+        return IPEXAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -47,7 +52,7 @@ class IPEXAttentionBackend(AttentionBackend):
 
 
 
-class IPEXAttentionImpl(AttentionImpl):
+class IPEXAttentionBackendImpl(AttentionImpl):
 
     def __init__(
         self,
@@ -55,11 +60,12 @@ class IPEXAttentionImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
@@ -89,18 +95,22 @@ class IPEXAttentionImpl(AttentionImpl):
             raise ValueError(
                 f"Head size {head_size} is not supported by FlashAttention. "
                 f"Supported head sizes are: {support_head_sizes}.")
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "IpexAttnBackendImpl")
 
     # TODO(gc): Refine this logic..., because of bad performance...
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_metadata: IPEXAttentionBackend,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with IPEXAttention.
 
@@ -113,16 +123,12 @@ class IPEXAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "IPEXAttentionImpl")
+        # # NOTE(woosuk): IPEXAttention does not support FP8 KV cache.
+        # assert k_scale == 1.0 and v_scale == 1.0, (
+        #     "key/v_scale is not supported in IPEXAttention.")
 
-        # NOTE(woosuk): IPEXAttention does not support FP8 KV cache.
-        assert k_scale == 1.0 and v_scale == 1.0, (
-            "key/v_scale is not supported in IPEXAttention.")
-
+        k_scale = layer._k_scale
+        v_scale = layer._v_scale
         output = torch.empty_like(query)
         # torch.ops.vllm.ipex_attn_chunked_prefill(
         ipex_llm_chunked_prefill(
@@ -215,7 +221,7 @@ def ipex_llm_chunked_prefill(
     logits_soft_cap: Optional[float] = None,
 ) -> None:
     context = get_forward_context()
-    current_metadata = context.dynamic_forward_context
+    current_metadata = context.attn_metadata
     if current_metadata is None:
         # Profiling run.
         return
@@ -299,7 +305,7 @@ def ipex_attn_chunked_prefill(
     logits_soft_cap: Optional[float] = None,
 ) -> None:
     context = get_forward_context()
-    current_metadata = context.dynamic_forward_context
+    current_metadata = context.attn_metadata
     if current_metadata is None:
         # Profiling run.
         return
