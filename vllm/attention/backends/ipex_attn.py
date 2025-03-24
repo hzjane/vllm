@@ -121,6 +121,7 @@ class IpexAttnMetadata(AttentionMetadata, PagedAttentionMetadata):
             # seq_start_loc=None,
             context_lens=self.context_lens[:self.num_prefills] if (torch.is_tensor(self.context_lens)) else None,
             block_tables=self.block_tables[:self.num_prefills],
+            enable_kv_scales_calculation=False,
         )
         return self._cached_prefill_metadata
 
@@ -343,7 +344,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
         using_gqa_kernel = use_gqa_kernel(self.num_heads, self.num_kv_heads, self.head_size, self.logits_soft_cap)
-        if kv_cache is not None:
+        if kv_cache.numel() > 0:
             if using_gqa_kernel:
                 key_cache, value_cache = self.split_kv_cache_ipexllm(
                     kv_cache, self.num_kv_heads, self.head_size)      

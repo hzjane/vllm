@@ -36,9 +36,9 @@ class XPUPlatform(Platform):
             logger.info("Cannot use %s backend on XPU.", selected_backend)
         use_v1 = envs.VLLM_USE_V1
         if use_v1:
-            return _Backend.IPEX_V1
+            return "vllm.v1.attention.backends.ipex_attn.IpexAttnBackend"
         else:
-            return _Backend.IPEX
+            return "vllm.attention.backends.ipex_attn.IpexAttnBackend"
 
     @staticmethod
     def get_device_capability(
