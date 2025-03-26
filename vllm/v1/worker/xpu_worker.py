@@ -31,6 +31,9 @@ class XPUWorker(Worker):
         assert device_config.device_type == "xpu"
         assert current_platform.is_xpu()
 
+    def load_model(self) -> None:
+        self.model_runner.load_model()
+
     # we provide this function due to `torch.xpu.mem_get_info()` doesn't
     # return correct free_gpu_memory on intel client GPU. We need to
     # calculate/estiamte it.
@@ -162,4 +165,4 @@ def init_worker_distributed_environment(
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
     # global all_reduce needed for overall oneccl warm up
-    torch.distributed.all_reduce(torch.zeros(1).xpu())
+    # torch.distributed.all_reduce(torch.zeros(1).xpu())
