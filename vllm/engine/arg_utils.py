@@ -1119,6 +1119,8 @@ class EngineArgs:
             type=nullable_str,
             default=None,
             help="Path for Low-bit saver")
+        
+        parser.add_argument(
             "--disable-cascade-attn",
             action="store_true",
             default=False,

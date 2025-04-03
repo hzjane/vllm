@@ -14,8 +14,8 @@ from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
-from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_fp8,
-                                           get_flash_attn_version)
+# from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_fp8,
+#                                            get_flash_attn_version)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
