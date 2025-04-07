@@ -26,7 +26,7 @@ def load_module_from_path(module_name, path):
     spec.loader.exec_module(module)
     return module
 
-os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = "0.8.1+ipexllm"
+os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = "0.8.3+ipexllm"
 ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
 
