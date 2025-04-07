@@ -281,6 +281,10 @@ def initialize_ray_cluster(
         ray_address: The address of the Ray cluster. If None, uses
             the default Ray cluster address.
     """
+    lowbit = os.getenv("IPEX_LLM_LOWBIT", None)
+    if lowbit is not None:
+        from ipex_llm.vllm.xpu.model_convert import _ipex_llm_convert
+        _ipex_llm_convert(lowbit)
     assert_ray_available()
     from vllm.platforms import current_platform
 
