@@ -250,7 +250,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                     input_positions.append(position)
                 if is_prompt:
                     mm_data = seq_group_metadata.multi_modal_data
-                    if mm_data and not self.runner.model_is_mrope:
+                    if mm_data and not self.runner.model_is_mrope and not self.runner.mm_registry.has_processor(self.runner.model_config):
                         mm_kwargs = self.multi_modal_input_mapper(mm_data)
                     else:
                         mm_kwargs = mm_data
