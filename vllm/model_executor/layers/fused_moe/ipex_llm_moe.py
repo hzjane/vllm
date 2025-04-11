@@ -170,7 +170,8 @@ class IPEXLLMFusedMoEMethod(FusedMoEMethodBase):
         # super().process_weights_after_loading(layer)
         
         device = layer.w13_weight.data.device
-        qtype = ggml_tensor_qtype["sym_int4"]
+        lowbit = os.getenv("IPEX_LLM_LOWBIT", "sym_int4")
+        qtype = ggml_tensor_qtype[lowbit]
         w13_params = FP4Params(data=layer.w13_weight.data,
                                 requires_grad=False,
                                 quantized=False,
@@ -285,27 +286,9 @@ class IPEXLLMFusedMoEMethod(FusedMoEMethodBase):
         orig_shape = hidden_states.shape
         hidden_size = hidden_states.shape[-1]
         num_tokens = hidden_states.shape[:-1].numel()
-        # print(w1.shape)
-        # print(w2.shape)
         num_experts = self.num_experts
         intermediate_size = self.intermediate_size
 
-        # w1 = w1.view(num_experts, intermediate_size * 2, -1)
-        # w2 = w2.view(num_experts, hidden_size, -1)
-        # print(w1.shape)
-        # print(w2.shape)
-
-        # w1_shape = (num_experts, intermediate_size * 2, hidden_size)
-        # w_2shape = (num_experts, hidden_size, intermediate_size)
-
-        # w1 = ggml_int4_convert_fp32(w1, w1_shape, w1_shape[0] * w1_shape[1])
-        # w2 = ggml_int4_convert_fp32(w2, w2_shape, w2_shape[0] * w2_shape[1])
-
-        # print(w1.shape)
-        # print(w2.shape)
-        
-        # num_experts = w1.shape[0]
-        # intermediate_size = w2.shape[-1]
         device = hidden_states.device
         dtype = hidden_states.dtype
         hidden_states = hidden_states.view(num_tokens, hidden_size)
@@ -323,15 +306,11 @@ class IPEXLLMFusedMoEMethod(FusedMoEMethodBase):
         group_sizes = custom_histogram(topk_indices.to(torch.int32), 0, num_experts - 1)
         
         x = hidden_states[token_indices]
-        # import pdb
-        # pdb.set_trace()
 
         lowbit = os.getenv("IPEX_LLM_LOWBIT", "sym_int4")
         qtype = ggml_tensor_qtype[lowbit]
         w1 = xe_linear.dequant(x, w1.contiguous(), qtype)
         w2 = xe_linear.dequant(x, w2.contiguous(), qtype)
-        # print(cur_w1.shape)
-        # print(cur_w2.shape)
 
         w1 = w1.view(num_experts, intermediate_size * 2, hidden_size)
         w2 = w2.view(num_experts, hidden_size, intermediate_size)
