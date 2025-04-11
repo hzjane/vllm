@@ -63,6 +63,15 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
 class XPURayDistributedExecutor(RayDistributedExecutorV0, Executor):
     """XPU Ray distributed executor without Compiled Graphs."""
 
+    def __init__(self, *args, **kwargs):
+        import os
+        lowbit = os.getenv("IPEX_LLM_LOWBIT", None)
+        if lowbit is not None:
+            from ipex_llm.vllm.xpu.model_convert import _ipex_llm_convert
+            _ipex_llm_convert(lowbit)
+        super().__init__(*args, **kwargs)
+
+
     def execute_model(
         self,
         scheduler_output,

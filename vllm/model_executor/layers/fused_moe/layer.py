@@ -136,16 +136,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             layer.w2_weight = torch.nn.Parameter(shuffled_w2,
                                                  requires_grad=False)
 
-        if current_platform.is_cpu():
-            if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                import intel_extension_for_pytorch as ipex
-                layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
-                    layer.w13_weight,
-                    layer.w2_weight,
-                    use_prepack=envs.VLLM_CPU_MOE_PREPACK,
-                )
-            else:
-                raise NotImplementedError("CPU MOE only supports x86 arch.")
+        if current_platform.is_xpu() or (current_platform.is_cpu() and current_platform.get_cpu_architecture() == CpuArchEnum.X86):
+            import intel_extension_for_pytorch as ipex
+            layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
+                layer.w13_weight,
+                layer.w2_weight,
+                use_prepack=envs.VLLM_CPU_MOE_PREPACK,
+            )
+        else:
+            raise NotImplementedError("CPU MOE only supports x86 arch.")
 
     def apply(
         self,
@@ -277,22 +276,22 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         apply_router_weight_on_input: bool = False,
         **kwargs,
     ):
-        # assert not use_grouped_topk
-        # assert num_expert_group is None
-        # assert topk_group is None
-        # assert custom_routing_function is None
-        # if scoring_func != "softmax":
-        #     raise NotImplementedError(
-        #         "Only softmax scoring function is supported for TPU.")
-        # if e_score_correction_bias is not None:
-        #     raise NotImplementedError(
-        #         "Expert score correction bias is not supported for TPU.")
-        return fused_moe_xpu(hidden_states=x,
-                                w1=layer.w13_weight,
-                                w2=layer.w2_weight,
-                                topk=top_k,
-                                gating_output=router_logits,
-                                renormalize=renormalize)
+        assert custom_routing_function is None
+        return layer.ipex_fusion(
+            x,
+            use_grouped_topk,
+            top_k,
+            router_logits,
+            renormalize,
+            topk_group,
+            num_expert_group,
+        )
+        # return fused_moe_xpu(hidden_states=x,
+        #                         w1=layer.w13_weight,
+        #                         w2=layer.w2_weight,
+        #                         topk=top_k,
+        #                         gating_output=router_logits,
+        #                         renormalize=renormalize)
 
     def forward_hpu(
         self,
@@ -535,8 +534,15 @@ class FusedMoE(torch.nn.Module):
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         if quant_config is None:
-            self.quant_method: Optional[QuantizeMethodBase] = (
-                UnquantizedFusedMoEMethod())
+            import os
+            lowbit = os.getenv("IPEX_LLM_LOWBIT", None)
+            if lowbit is not None:
+                from vllm.model_executor.layers.fused_moe.ipex_llm_moe import IPEXLLMFusedMoEMethod
+                self.quant_method: Optional[QuantizeMethodBase] = (
+                    IPEXLLMFusedMoEMethod())
+            else:
+                self.quant_method: Optional[QuantizeMethodBase] = (
+                    UnquantizedFusedMoEMethod())
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
         assert self.quant_method is not None
