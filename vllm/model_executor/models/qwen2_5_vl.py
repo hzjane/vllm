@@ -304,6 +304,10 @@ class Qwen2_5_VisionAttention(nn.Module):
         elif self.attn_backend == _Backend.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
             outputs = []
+            head_dim = q.shape[-1]
+            import math
+            import xe_addons
+            scale = 1 / math.sqrt(head_dim)
             for i in range(1, len(cu_seqlens)):
                 start_idx = cu_seqlens[i - 1]
                 end_idx = cu_seqlens[i]
@@ -312,10 +316,16 @@ class Qwen2_5_VisionAttention(nn.Module):
                 v_i = v[:, start_idx:end_idx]
                 q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
                                  for x in [q_i, k_i, v_i])
-                output_i = F.scaled_dot_product_attention(q_i,
-                                                          k_i,
-                                                          v_i,
-                                                          dropout_p=0.0)
+                # output_i = F.scaled_dot_product_attention(q_i,
+                #                                           k_i,
+                #                                           v_i,
+                #                                           dropout_p=0.0)
+                output_i = xe_addons.sdp_non_causal(
+                    q_i.contiguous(),
+                    k_i.contiguous(),
+                    v_i.contiguous(),
+                    None,
+                    scale)
                 output_i = rearrange(output_i, "b h s d -> b s h d ")
                 outputs.append(output_i)
             context_layer = torch.cat(outputs, dim=1)
