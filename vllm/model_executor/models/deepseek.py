@@ -35,6 +35,7 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe.moe_pallas import fused_moe_xpu
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -144,14 +145,14 @@ class DeepseekMoE(nn.Module):
         w1s = torch._utils._unflatten_dense_tensors(self.w1, w1)
         for data, param in zip(w1s, w1):
             param.data = data
-        self.w1 = self.w1.view(len(w1), *w1s[0].shape)
+        self.w1 = self.w1.view(len(w1), *w1s[0].shape).to("xpu")
 
         self.w2 = torch._utils._flatten_dense_tensors(w2)
         w2s = torch._utils._unflatten_dense_tensors(self.w2, w2)
         for data, param in zip(w2s, w2):
             param.data = data
 
-        self.w2 = self.w2.view(len(w2), *w2s[0].shape)
+        self.w2 = self.w2.view(len(w2), *w2s[0].shape).to("xpu")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
@@ -160,13 +161,14 @@ class DeepseekMoE(nn.Module):
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = fused_moe(hidden_states,
+        final_hidden_states = fused_moe_xpu(hidden_states,
                                         self.w1,
                                         self.w2,
                                         router_logits,
                                         self.top_k,
                                         renormalize=self.config.norm_topk_prob,
-                                        inplace=True)
+                                        )
+                                        #inplace=True)
 
         if self.config.n_shared_experts is not None:
             final_hidden_states = final_hidden_states + shared_output

@@ -749,6 +749,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         inv_freq_mask = (1 - _yarn_linear_ramp_mask(
             low, high, self.rotary_dim // 2,
             dtype=torch.float)) * self.extrapolation_factor
+        inv_freq_mask = inv_freq_mask.to("xpu")
         inv_freq = inv_freq_interpolation * (
             1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
         return inv_freq
