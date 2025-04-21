@@ -91,4 +91,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     &awq_dequantize,
     "dequant method for awq");
 
+
+  ops.def(
+    "moe_forward",
+    &moe_forward,
+    "PagedAttention GQA.");
+
+  ops.def(
+    "fused_moe_forward",
+    &fused_moe_forward,
+    "PagedAttention GQA.");
+
 }
