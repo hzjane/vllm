@@ -188,9 +188,12 @@ class SelfAttention(nn.Module):
         scale = 1 / math.sqrt(self.head_size) if self.scale is None else self.scale
         from ipex_llm.transformers.models.common import padding_qkv_hd
 
+        num = 80
+        if self.head_size > 80:
+            num = 128
         query, key, value, = padding_qkv_hd(
             query, key, value,
-            self.head_size, 80
+            self.head_size, num
         )
         if use_sdp_causal(query.shape[-1], query, 0):
             out = xe_addons.sdp_non_causal(query.contiguous(), key.contiguous(), value.contiguous(), mask, scale)[:, :, :, :self.head_size].transpose(1, 2)
@@ -244,6 +247,8 @@ class SiglipAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
+        # self.attn = MultiHeadAttention(self.num_heads_per_partition,
+        #                                self.head_dim, self.scale)
         self.attn = SelfAttention(self.num_heads_per_partition,
                                   self.head_dim, self.scale)
 
