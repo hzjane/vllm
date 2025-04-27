@@ -111,8 +111,11 @@ class EVA2CLIPAttention(nn.Module):
             prefix=f"{prefix}.dense",
         )
 
-        self.attn = MultiHeadAttention(self.num_heads_per_rank, self.head_dim,
-                                       self.scale)
+        # self.attn = MultiHeadAttention(self.num_heads_per_rank, self.head_dim,
+        #                                self.scale)
+        from siglip import SelfAttention
+        self.attn = SelfAttention(self.num_heads_per_rank, self.head_dim,
+                                self.scale)
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

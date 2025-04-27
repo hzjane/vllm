@@ -217,7 +217,7 @@ def _make_attention_mask(
 def use_sdp_causal(head_dim, query_states, logits_soft_cap):
     return (
         (logits_soft_cap != 0                        # for gemma model 
-        or head_dim in [-1, 64, 80, 96, 128])        # for now
+        or head_dim in [-1, 64, 80, 96, 128, 256])        # for now
         and query_states.device.type == "xpu"        # GPU
         and query_states.dtype in [torch.float, torch.half]     # fp32/fp16
     )

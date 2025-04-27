@@ -140,6 +140,74 @@ class SiglipVisionEmbeddings(nn.Module):
         return embeddings
 
 
+class SelfAttention(nn.Module):
+    """Multi-headed attention without any cache, used for ViT."""
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: Optional[int] = None,
+    ):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = scale
+        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+
+        assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> torch.Tensor:
+        """Input shape: batch_size x seq_len x hidden_size"""
+        # TODO(Isotr0py): Use existing backend implementations and support FA2
+        bsz, q_len, _ = query.size()
+        kv_len = key.size(1)
+
+        query = query.view(bsz, q_len, self.num_heads, self.head_size)
+        key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
+        value = value.view(bsz, kv_len, self.num_kv_heads, self.head_size)
+
+        if (num_repeat := self.num_queries_per_kv) > 1:
+            # Handle MQA and GQA
+            key = torch.repeat_interleave(key, num_repeat, dim=2)
+            value = torch.repeat_interleave(value, num_repeat, dim=2)
+
+        query, key, value = (x.transpose(1, 2)
+                                for x in (query, key, value))
+        from ipex_llm.transformers.models.utils import use_sdp_causal
+        from vllm.attention.backends.ipex_attn import use_sdp_causal
+        import xe_addons, math
+        mask = None
+        scale = 1 / math.sqrt(self.head_size) if self.scale is None else self.scale
+        from ipex_llm.transformers.models.common import padding_qkv_hd
+
+        num = 80
+        if self.head_size > 80:
+            num = 128
+        query, key, value, = padding_qkv_hd(
+            query, key, value,
+            self.head_size, num
+        )
+        if use_sdp_causal(query.shape[-1], query, 0):
+            out = xe_addons.sdp_non_causal(query.contiguous(), key.contiguous(), value.contiguous(), mask, scale)[:, :, :, :self.head_size].transpose(1, 2)
+        # import torch.nn.functional as F
+        # out = F.scaled_dot_product_attention(query,
+        #                                      key,
+        #                                      value,
+        #                                      scale=self.scale)
+        # out = out.transpose(1, 2)
+        #return out.view(bsz, q_len, -1)
+        return out.reshape(bsz, q_len, -1)
+
+
+
 class SiglipAttention(nn.Module):
 
     def __init__(
@@ -179,8 +247,10 @@ class SiglipAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        self.attn = MultiHeadAttention(self.num_heads_per_partition,
-                                       self.head_dim, self.scale)
+        # self.attn = MultiHeadAttention(self.num_heads_per_partition,
+        #                                self.head_dim, self.scale)
+        self.attn = SelfAttention(self.num_heads_per_partition,
+                                  self.head_dim, self.scale)
 
     def forward(
         self,
