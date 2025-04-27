@@ -467,6 +467,10 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                                 self.scale).squeeze(0).movedim(
                                     query.dim() - 2, 0)                            
                     else:
+                        if not self.need_mask:
+                            mask = None
+                        else:
+                            mask = mask.to("xpu")
                         sub_out = torch.nn.functional.scaled_dot_product_attention(
                             query[None, :, start:end, :],
                             key[None, :, start:end, :],

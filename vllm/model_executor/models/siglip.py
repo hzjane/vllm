@@ -188,7 +188,6 @@ class SelfAttention(nn.Module):
         scale = 1 / math.sqrt(self.head_size) if self.scale is None else self.scale
         from ipex_llm.transformers.models.common import padding_qkv_hd
 
-        print(f"self.head_size: {self.head_size}")
         query, key, value, = padding_qkv_hd(
             query, key, value,
             self.head_size, 80
