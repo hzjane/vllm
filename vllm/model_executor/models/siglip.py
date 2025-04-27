@@ -193,7 +193,7 @@ class SelfAttention(nn.Module):
             self.head_size, 80
         )
         if use_sdp_causal(query.shape[-1], query, 0):
-            out = xe_addons.sdp_causal(query.contiguous(), key.contiguous(), value.contiguous(), mask, scale)[:, :, :, :self.head_size].transpose(1, 2)
+            out = xe_addons.sdp_non_causal(query.contiguous(), key.contiguous(), value.contiguous(), mask, scale)[:, :, :, :self.head_size].transpose(1, 2)
         # import torch.nn.functional as F
         # out = F.scaled_dot_product_attention(query,
         #                                      key,
