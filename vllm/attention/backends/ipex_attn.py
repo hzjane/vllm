@@ -217,7 +217,7 @@ def _make_attention_mask(
 def use_sdp_causal(head_dim, query_states, logits_soft_cap):
     return (
         (logits_soft_cap != 0                        # for gemma model 
-        or head_dim in [-1, 64, 80, 96, 128])        # for now
+        or head_dim in [-1, 64, 80, 96, 128, 256])        # for now
         and query_states.device.type == "xpu"        # GPU
         and query_states.dtype in [torch.float, torch.half]     # fp32/fp16
     )
@@ -467,10 +467,6 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                                 self.scale).squeeze(0).movedim(
                                     query.dim() - 2, 0)                            
                     else:
-                        if not self.need_mask:
-                            mask = None
-                        else:
-                            mask = mask.to("xpu")
                         sub_out = torch.nn.functional.scaled_dot_product_attention(
                             query[None, :, start:end, :],
                             key[None, :, start:end, :],
