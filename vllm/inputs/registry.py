@@ -330,7 +330,7 @@ class InputRegistry:
         from vllm.multimodal.profiling import MultiModalProfiler
         from vllm.sequence import SequenceData
 
-        if mm_registry.has_processor(model_config):
+        if False and mm_registry.has_processor(model_config):
             processor = mm_registry.create_processor(model_config,
                                                      disable_cache=True)
             profiler = MultiModalProfiler(processor)

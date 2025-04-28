@@ -789,6 +789,7 @@ class XPUModelRunnerBase(ModelRunnerBase[TModelInputForXPU]):
         # To exercise the worst scenario for GPU memory consumption,
         # the number of seqs (batch_size) is chosen to maximize the number
         # of images processed.
+        '''
         max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
             self.model_config)
         if max_mm_tokens > 0:
@@ -802,6 +803,7 @@ class XPUModelRunnerBase(ModelRunnerBase[TModelInputForXPU]):
                     "Computed max_num_seqs (%s) to be less than 1. "
                     "Setting it to the minimum value of 1.", expr)
                 max_num_seqs = 1
+        '''
 
         batch_size = 0
         import os
