@@ -181,9 +181,9 @@ class SelfAttention(nn.Module):
 
         query, key, value = (x.transpose(1, 2)
                                 for x in (query, key, value))
-        from ipex_llm.transformers.models.utils import use_sdp_causal
         from vllm.attention.backends.ipex_attn import use_sdp_causal
         import xe_addons, math
+        from vllm.attention.backends.abstract import AttentionType
         mask = None
         scale = 1 / math.sqrt(self.head_size) if self.scale is None else self.scale
         from ipex_llm.transformers.models.common import padding_qkv_hd
@@ -195,7 +195,7 @@ class SelfAttention(nn.Module):
             query, key, value,
             self.head_size, num
         )
-        if use_sdp_causal(query.shape[-1], query, 0):
+        if use_sdp_causal(query.shape[-1], query, 0, AttentionType.DECODER):
             out = xe_addons.sdp_non_causal(query.contiguous(), key.contiguous(), value.contiguous(), mask, scale)[:, :, :, :self.head_size].transpose(1, 2)
         # import torch.nn.functional as F
         # out = F.scaled_dot_product_attention(query,
