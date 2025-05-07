@@ -358,7 +358,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         slot_mapping_tensor = torch.tensor(slot_mapping,
                                            dtype=torch.long,
                                            device=self.device)
-        if need_block_table:
+        if need_block_table or "bge" in self.runner.model_config.model.lower():
             seq_lens_tensor = torch.tensor(seq_lens,
                                         dtype=torch.int,
                                         device=self.device)
