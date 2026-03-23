@@ -23,12 +23,11 @@ if current_platform.is_cuda():
     )
 
 elif current_platform.is_xpu():
-    from vllm import _custom_ops as ops
-    from vllm._xpu_ops import xpu_ops
+    from vllm._ipex_ops import ipex_ops
 
-    reshape_and_cache_flash = ops.reshape_and_cache_flash
-    flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func  # type: ignore[assignment]
-    get_scheduler_metadata = xpu_ops.get_scheduler_metadata  # type: ignore[assignment]
+    reshape_and_cache_flash = ipex_ops.reshape_and_cache_flash
+    flash_attn_varlen_func = ipex_ops.flash_attn_varlen_func  # type: ignore[assignment]
+    get_scheduler_metadata = ipex_ops.get_scheduler_metadata  # type: ignore[assignment]
 elif current_platform.is_rocm():
     try:
         from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
@@ -155,6 +154,8 @@ def get_flash_attn_version(
 
 
 def flash_attn_supports_fp8() -> bool:
+    if current_platform.is_xpu():
+        return True
     return (
         get_flash_attn_version() == 3
         and current_platform.is_device_capability_family(90)

@@ -45,6 +45,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import (
@@ -72,6 +73,8 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        if current_platform.is_xpu():
+            return [64]
         vllm_config = get_current_vllm_config()
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
@@ -138,12 +141,14 @@ class FlashAttentionBackend(AttentionBackend):
         # `stride_order` indicates the permutation that gets
         # us from `get_kv_cache_shape` to the actual memory layout we want.
         cache_layout = get_kv_cache_layout()
-        if cache_layout == "NHD" and include_num_layers_dimension:
+        if (cache_layout == "NHD" and include_num_layers_dimension
+                and not current_platform.is_xpu()):
             # (num_blocks, num_layers, 2, block_size, num_kv_heads, head_size)
             return (2, 0, 1, 3, 4, 5)
         elif cache_layout == "NHD":
             stride_order = (0, 1, 2, 3, 4)
-        elif cache_layout == "HND" and include_num_layers_dimension:
+        elif (cache_layout == "HND" and include_num_layers_dimension
+                and not current_platform.is_xpu()):
             # (num_blocks, num_kv_heads, num_layers, 2, block_size, head_size)
             return (2, 4, 0, 1, 3, 5)
         elif cache_layout == "HND":

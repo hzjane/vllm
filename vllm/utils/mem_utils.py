@@ -251,7 +251,9 @@ def memory_profiling(
     """
     gc.collect()
     torch.accelerator.empty_cache()
-    torch.accelerator.reset_peak_memory_stats(baseline_snapshot.device_)
+    # Use device index for reset_peak_memory_stats because
+    # torch.accelerator.reset_peak_memory_stats(torch.device) fails on XPU.
+    torch.accelerator.reset_peak_memory_stats(baseline_snapshot.device_.index)
 
     result = MemoryProfilingResult(
         before_create=baseline_snapshot,

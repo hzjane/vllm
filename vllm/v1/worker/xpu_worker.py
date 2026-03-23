@@ -116,3 +116,49 @@ class XPUWorker(Worker):
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
+
+    @torch.inference_mode()
+    def determine_available_memory(self) -> int:
+        if not os.environ.get("VLLM_XPU_SIMPLE_MEM_PROFILE", "0") == "1":
+            return super().determine_available_memory()
+
+        # Simplified memory profiling from llm-scaler-vllm-xpu.
+        # Uses torch.xpu.memory_allocated() instead of MemorySnapshot-based
+        # profiling. Enable via VLLM_XPU_SIMPLE_MEM_PROFILE=1 if the default
+        # profiling produces inaccurate results on XPU.
+        torch.xpu.empty_cache()
+        self.model_runner.profile_run()
+
+        torch.xpu.synchronize()
+        used_memory = torch.xpu.memory_allocated()
+        total_gpu_memory = torch.xpu.get_device_properties(
+            self.local_rank
+        ).total_memory
+
+        peak_memory = used_memory
+        assert peak_memory > 0, (
+            "Error in memory profiling. "
+            f"used_memory={used_memory}. "
+            "GPU memory was not properly cleaned up before initializing "
+            "the vLLM instance."
+        )
+
+        torch.xpu.empty_cache()
+
+        available_kv_cache_memory = (
+            total_gpu_memory * self.cache_config.gpu_memory_utilization
+            - peak_memory
+        )
+
+        if self.local_rank == 0:
+            from vllm.utils.mem_utils import format_gib
+            logger.info(
+                "[XPU simple mem profile] total=%.2f GiB, used=%.2f GiB, "
+                "util=%.2f, available_kv_cache=%.2f GiB",
+                total_gpu_memory / (1024**3),
+                used_memory / (1024**3),
+                self.cache_config.gpu_memory_utilization,
+                available_kv_cache_memory / (1024**3),
+            )
+
+        return int(available_kv_cache_memory)

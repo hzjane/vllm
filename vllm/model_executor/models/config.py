@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -146,7 +147,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 dtype=kv_cache_dtype,
             ).page_size_bytes
         else:
-            kernel_block_alignment_size = 16
+            kernel_block_alignment_size = 64 if current_platform.is_xpu() else 16
             attn_page_size_1_token = FullAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
