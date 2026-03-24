@@ -339,6 +339,87 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
+        if (
+            hidden_states.shape[0] == 1
+            and current_platform.is_xpu()
+            and hasattr(self.gate, "weight_scale")
+        ):
+            import moe_ops
+
+            x = hidden_states
+            router_weight, router_scale = self.gate.weight, self.gate.weight_scale
+            TOP_K = self.experts.top_k
+            NORM_TOPK_PROB = self.experts.renormalize
+
+            gate_up_weight, gate_up_scale = (
+                self.experts.w13_weight,
+                self.experts.w13_weight_scale,
+            )
+
+            down_weight, down_scale = (
+                self.experts.w2_weight,
+                self.experts.w2_weight_scale,
+            )
+
+            shared_gate_up_weight, shared_gate_up_scale = (
+                self.shared_expert.gate_up_proj.weight,
+                self.shared_expert.gate_up_proj.weight_scale,
+            )
+            shared_down_weight, shared_down_scale = (
+                self.shared_expert.down_proj.weight,
+                self.shared_expert.down_proj.weight_scale,
+            )
+
+            shared_expert_gate_w = (
+                self.shared_expert_gate.weight
+                if self.shared_expert is not None
+                else None
+            )
+            NUM_SHARED_EXPERTS = 1
+
+            logits = moe_ops.moe_router_forward(x, router_weight, router_scale)
+
+            topk_idx, topk_weight = moe_ops.moe_topk(logits, TOP_K, NORM_TOPK_PROB)
+            intermediates = moe_ops.moe_up_forward(
+                x,
+                gate_up_weight,
+                gate_up_scale,
+                shared_gate_up_weight,
+                shared_gate_up_scale,
+                topk_idx,
+                TOP_K,
+                NUM_SHARED_EXPERTS,
+            )
+            partials = moe_ops.moe_down_forward(
+                x,
+                intermediates,
+                down_weight,
+                down_scale,
+                shared_down_weight,
+                shared_down_scale,
+                shared_expert_gate_w,
+                topk_weight,
+                topk_idx,
+                TOP_K,
+                NUM_SHARED_EXPERTS,
+            )
+            final_hidden_states = moe_ops.moe_accumulate(
+                partials, TOP_K, NUM_SHARED_EXPERTS
+            )
+
+            if self.is_sequence_parallel:
+                final_hidden_states = tensor_model_parallel_all_gather(
+                    final_hidden_states, 0
+                )
+                final_hidden_states = final_hidden_states[:num_tokens]
+            elif self.tp_size > 1:
+                final_hidden_states = (
+                    self.experts.maybe_all_reduce_tensor_model_parallel(  # noqa E501
+                        final_hidden_states
+                    )
+                )
+            return final_hidden_states.view(orig_shape)
+
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
@@ -642,6 +723,68 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         2. Core attention (custom op)
         3. Output projection
         """
+
+        if current_platform.is_xpu():
+            self.forward_xpu(hidden_states, output)
+
+        else:
+            num_tokens = hidden_states.size(0)
+
+            # ============================================================
+            # Part 1: Input Projection
+            # ============================================================
+            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            projected_states_ba, _ = self.in_proj_ba(hidden_states)
+            query, key, value, z, b, a = self.fix_query_key_value_ordering(
+                projected_states_qkvz, projected_states_ba
+            )
+            query, key, value = map(
+                lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
+            )
+            mixed_qkv = torch.cat((query, key, value), dim=-1)
+
+            # ============================================================
+            # Part 2: Core Attention (Custom Op)
+            # ============================================================
+            # Note: we should not use torch.empty here like other attention backends,
+            # see discussions in https://github.com/vllm-project/vllm/pull/28182
+            core_attn_out = torch.zeros(
+                (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+
+            torch.ops.vllm.gdn_attention_core(
+                mixed_qkv,
+                b,
+                a,
+                core_attn_out,
+                self.prefix,
+            )
+
+            # ============================================================
+            # Part 3: Output Projection
+            # ============================================================
+            z_shape_og = z.shape
+            # Reshape input data into 2D tensor
+            core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+            z = z.reshape(-1, z.shape[-1])
+            core_attn_out = self.norm(core_attn_out, z)
+            core_attn_out = core_attn_out.reshape(z_shape_og)
+            core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+            output[:num_tokens], _ = self.out_proj(core_attn_out)
+
+    def forward_xpu(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+    ):
+        """
+        Forward pass with three parts:
+        1. Input projection
+        2. Core attention (custom op)
+        3. Output projection
+        """
         num_tokens = hidden_states.size(0)
 
         # ============================================================
@@ -649,32 +792,57 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
         projected_states_ba, _ = self.in_proj_ba(hidden_states)
-        query, key, value, z, b, a = self.fix_query_key_value_ordering(
-            projected_states_qkvz, projected_states_ba
-        )
-        query, key, value = map(
-            lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
-        )
-        mixed_qkv = torch.cat((query, key, value), dim=-1)
 
         # ============================================================
-        # Part 2: Core Attention (Custom Op)
+        # Part 2: Core Attention
         # ============================================================
-        # Note: we should not use torch.empty here like other attention backends,
-        # see discussions in https://github.com/vllm-project/vllm/pull/28182
+        forward_context = get_forward_context()
+        attn_metadata: AttentionMetadata = forward_context.attn_metadata
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
+        z = torch.empty_like(core_attn_out)
+        if attn_metadata is not None:
+            attn_metadata = attn_metadata[self.prefix]
 
-        torch.ops.vllm.gdn_attention_core(
-            mixed_qkv,
-            b,
-            a,
-            core_attn_out,
-            self.prefix,
-        )
+            # TODO: xpu does not support this param yet
+            spec_sequence_masks = attn_metadata.spec_sequence_masks
+            assert spec_sequence_masks is None
+
+            conv_weights = self.conv1d.weight.view(
+                self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+            )
+
+            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            conv_state = self_kv_cache[0]
+            ssm_state = self_kv_cache[1]
+
+            torch.ops._xpu_C.gdn_attention(
+                core_attn_out,
+                z,
+                projected_states_qkvz,
+                projected_states_ba,
+                self.num_k_heads,
+                self.num_v_heads,
+                self.head_k_dim,
+                self.head_v_dim,
+                conv_state=conv_state,
+                ssm_state=ssm_state,
+                conv_weights=conv_weights,
+                conv_bias=self.conv1d.bias,
+                activation=self.activation,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                num_prefills=attn_metadata.num_prefills,
+                num_decodes=attn_metadata.num_decodes,
+                has_initial_state=attn_metadata.has_initial_state,
+                non_spec_query_start_loc=attn_metadata.non_spec_query_start_loc,
+                non_spec_state_indices_tensor=attn_metadata.non_spec_state_indices_tensor,
+                num_actual_tokens=attn_metadata.num_actual_tokens,
+                tp_size=self.tp_size,
+            )
 
         # ============================================================
         # Part 3: Output Projection

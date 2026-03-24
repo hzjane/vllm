@@ -386,7 +386,24 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.forward_cuda(x, residual)
+        if self.variance_size_override is not None:
+            return self.forward_native(x, residual)
+
+        from vllm._ipex_ops import ipex_ops as ops
+
+        if residual is not None:
+            ops.fused_add_rms_norm(
+                x,
+                residual,
+                self.weight.data,
+                self.variance_epsilon,
+            )
+            return x, residual
+        return ops.rms_norm(
+            x,
+            self.weight.data,
+            self.variance_epsilon,
+        )
 
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"
@@ -487,6 +504,26 @@ class GemmaRMSNorm(CustomOp):
             )
             self._is_compiled = True
         return self.forward_native(x, residual)
+    
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+            
+        from vllm._ipex_ops import ipex_ops as ops
+
+        # Gemma weight semantics: x * (1 + w) instead of x * w
+        # Cache the adjusted weight to avoid an AddFunctor kernel per call
+        if not hasattr(self, '_gemma_w'):
+            self._gemma_w = self.weight.data + 1.0
+
+        if residual is not None:
+            ops.fused_add_rms_norm(x, residual, self._gemma_w,
+                                   self.variance_epsilon)
+            return x, residual
+        return ops.rms_norm(x, self._gemma_w, self.variance_epsilon)
+
 
 
 # --8<-- [start:rms_norm_gated]
@@ -588,6 +625,22 @@ class RMSNormGated(CustomOp):
         return out.to(orig_dtype)
 
     def forward_cuda(
+        self, x: torch.Tensor, z: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
+
+        return rmsnorm_fn(
+            x,
+            self.weight,
+            self.bias,
+            z=z,
+            eps=self.eps,
+            group_size=self.group_size,
+            norm_before_gate=self.norm_before_gate,
+            activation=self.activation,
+        )
+
+    def forward_xpu(
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn

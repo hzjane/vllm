@@ -381,6 +381,13 @@ class Worker(WorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
+        _dbg = self.local_rank == 0  # DEBUG: only print on rank 0
+        if _dbg:
+            print(f"\n[DEBUG MEM] === determine_available_memory START ===")
+            print(f"[DEBUG MEM] device={self.device}, local_rank={self.local_rank}")
+            print(f"[DEBUG MEM] init_snapshot: {self.init_snapshot}")
+            print(f"[DEBUG MEM] requested_memory={format_gib(self.requested_memory)} GiB")
+            print(f"[DEBUG MEM] model_memory_usage={format_gib(int(self.model_runner.model_memory_usage))} GiB")
         with memory_profiling(
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
@@ -390,6 +397,8 @@ class Worker(WorkerBase):
             profile_torch_peak = torch.accelerator.memory_stats(self.device).get(
                 "allocated_bytes.all.peak", 0
             )
+            if _dbg:
+                print(f"[DEBUG MEM] after profile_run: torch_peak={format_gib(profile_torch_peak)} GiB")
 
             # Profile CUDA graph memory if graphs will be captured.
             # Skip on ROCm/HIP as graph pool handles and mem_get_info behave
@@ -407,6 +416,13 @@ class Worker(WorkerBase):
             + profile_result.torch_peak_increase
             + profile_result.weights_memory
         )
+        if _dbg:
+            print(f"[DEBUG MEM] before_profile snapshot: {profile_result.before_profile}")
+            print(f"[DEBUG MEM] after_profile snapshot: {profile_result.after_profile}")
+            print(f"[DEBUG MEM] torch_peak_increase={format_gib(profile_result.torch_peak_increase)} GiB")
+            print(f"[DEBUG MEM] non_torch_increase={format_gib(profile_result.non_torch_increase)} GiB")
+            print(f"[DEBUG MEM] weights_memory={format_gib(profile_result.weights_memory)} GiB")
+            print(f"[DEBUG MEM] non_kv_cache_memory={format_gib(profile_result.non_kv_cache_memory)} GiB")
 
         # On ROCm, cudagraph_memory_estimate is always 0 so this is a no-op.
         # On CUDA, respect the opt-in flag as originally designed.
@@ -439,6 +455,12 @@ class Worker(WorkerBase):
             - profile_result.non_kv_cache_memory
             - cudagraph_memory_estimate_applied
         )
+        if _dbg:
+            print(f"[DEBUG MEM] cudagraph_memory_estimate={format_gib(cudagraph_memory_estimate)} GiB")
+            print(f"[DEBUG MEM] cudagraph_memory_estimate_applied={format_gib(cudagraph_memory_estimate_applied)} GiB")
+            print(f"[DEBUG MEM] available_kv_cache_memory={format_gib(self.available_kv_cache_memory_bytes)} GiB")
+            print(f"[DEBUG MEM] formula: requested({format_gib(self.requested_memory)}) - non_kv_cache({format_gib(profile_result.non_kv_cache_memory)}) - cudagraph({format_gib(cudagraph_memory_estimate_applied)})")
+            print(f"[DEBUG MEM] === determine_available_memory END ===\n")
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
         logger.debug(
