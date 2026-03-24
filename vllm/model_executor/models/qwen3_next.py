@@ -292,7 +292,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             config.hidden_size,
             config.num_experts,
             bias=False,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=f"{prefix}.gate",
         )
 
@@ -347,7 +347,11 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             import moe_ops
 
             x = hidden_states
-            router_weight, router_scale = self.gate.weight, self.gate.weight_scale
+            # Note: Fp8OnlineLinearMethod transposes weights (.t()) during
+            # process_weights_after_loading, but moe_ops kernels expect the
+            # original [out_features, in_features] layout. Un-transpose here.
+            router_weight = self.gate.weight.t()
+            router_scale = self.gate.weight_scale
             TOP_K = self.experts.top_k
             NORM_TOPK_PROB = self.experts.renormalize
 
@@ -361,14 +365,10 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 self.experts.w2_weight_scale,
             )
 
-            shared_gate_up_weight, shared_gate_up_scale = (
-                self.shared_expert.gate_up_proj.weight,
-                self.shared_expert.gate_up_proj.weight_scale,
-            )
-            shared_down_weight, shared_down_scale = (
-                self.shared_expert.down_proj.weight,
-                self.shared_expert.down_proj.weight_scale,
-            )
+            shared_gate_up_weight = self.shared_expert.gate_up_proj.weight.t()
+            shared_gate_up_scale = self.shared_expert.gate_up_proj.weight_scale
+            shared_down_weight = self.shared_expert.down_proj.weight.t()
+            shared_down_scale = self.shared_expert.down_proj.weight_scale
 
             shared_expert_gate_w = (
                 self.shared_expert_gate.weight
