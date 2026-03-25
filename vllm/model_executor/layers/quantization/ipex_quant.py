@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.awq import AWQLinearMethod
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8LinearMethod,
+    Fp8OnlineLinearMethod,
     Fp8OnlineMoEMethod,
 )
 from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
@@ -47,9 +48,9 @@ from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import round_up
 from custom_esimd_kernels_vllm import (
-      esimd_gemv_fp8_pert,
-      esimd_gemv_fp8_pert_fused2,
-      esimd_gemv_fp8_pert_fused3,
+    esimd_gemv_fp8_pert,
+    esimd_gemv_fp8_pert_fused2,
+    esimd_gemv_fp8_pert_fused3,
 )
 
 MIN_IPEX_VERSION = "2.6.0"
@@ -395,23 +396,43 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
         return out.reshape(x.shape[:-1] + (layer.ipex_output_size,))
 
 
-class XPUFp8LinearMethod(Fp8LinearMethod):
+class XPUFp8LinearMethod(Fp8OnlineLinearMethod):
+    """XPU FP8 linear using esimd_gemv_fp8_pert for batch_size=1.
+    Inherits Fp8OnlineLinearMethod for meta-device weight init (avoids OOM).
+    """
+
     def __init__(self, quant_config: Fp8Config):
         super().__init__(quant_config)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
-        # If checkpoint not serialized fp8, quantize the weights.
+
+        if layer.weight.device == torch.device("meta"):
+            from vllm.model_executor.layers.linear import ModelWeightParameter
+            from vllm.model_executor.model_loader.weight_utils import (
+                initialize_single_dummy_weight,
+            )
+
+            weight = ModelWeightParameter(
+                data=torch.empty_like(layer.weight, device=layer._load_device),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=layer.weight.weight_loader,
+            )
+            layer.register_parameter("weight", weight)
+            initialize_single_dummy_weight(layer.weight)
+
         if not self.quant_config.is_checkpoint_fp8_serialized:
             qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
-            # Update the layer with the new values.
+            # NOT transposed: esimd_gemv_fp8_pert expects [out_features, in_features]
             replace_parameter(layer, "weight", qweight.data)
             replace_parameter(layer, "weight_scale", weight_scale.data)
             layer.input_scale = None
-            # print(f"[FP8 QUANT] weight={layer.weight.shape} scale={layer.weight_scale.shape} dtype={layer.weight_scale.dtype}")
         elif self.block_quant:
-            super().process_weights_after_loading(layer)
+            Fp8LinearMethod.process_weights_after_loading(self, layer)
+
+        layer._already_called_process_weights_after_loading = True
 
     def apply(
         self,
@@ -425,13 +446,13 @@ class XPUFp8LinearMethod(Fp8LinearMethod):
         #     print("================================================Begin ============================================")
         if self.block_quant:
             return self.w8a8_block_fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            input_scale=layer.input_scale,
-            bias=bias,
+                input=x,
+                weight=layer.weight,
+                weight_scale=layer.weight_scale,
+                input_scale=layer.input_scale,
+                bias=bias,
             )
-        
+
         weight = layer.weight.data
         weight_scale = layer.weight_scale.data
         # In case of pooler models, pooled_data may change to head_dtype like float
@@ -447,18 +468,17 @@ class XPUFp8LinearMethod(Fp8LinearMethod):
         # if False:
         if x.shape[0] == 1:
             # print("Invoke here...........#############################################")
-            out = torch.empty((x.shape[0], weight.shape[0]), dtype=torch.float16, device=x.device)
-            esimd_gemv_fp8_pert(x, weight, weight_scale
-                                , out)
+            out = torch.empty(
+                (x.shape[0], weight.shape[0]), dtype=torch.float16, device=x.device
+            )
+            esimd_gemv_fp8_pert(x, weight, weight_scale, out)
             return out
         else:
-            output = torch.ops._xpu_C.fp8_gemm_w8a16(
-                x, weight.t(), weight_scale, bias
-            )
+            output = torch.ops._xpu_C.fp8_gemm_w8a16(x, weight.t(), weight_scale, bias)
             return output
             # if _debug:
             #     print("[for debug only] output shape after fp8_gemm_w8a16:", output.shape)
-        
+
         # assert out.shape == output.shape, f"Output shape mismatch between esimd_gemv_fp8_pert and fp8_gemm_w8a16: {out.shape} vs {output.shape}"
         # if x.shape[0] == 1:
         #     has_nan = torch.isnan(out).any().item()
@@ -496,14 +516,15 @@ class XPUFp8MoEMethod(Fp8OnlineMoEMethod):
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
-        # WEIGHTS
+        # WEIGHTS - allocate on CPU first to avoid OOM during loading,
+        # weights will be moved to device after fp8 quantization.
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
                 2 * intermediate_size_per_partition,
                 hidden_size,
                 dtype=params_dtype,
-                device="cpu" if envs.VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT else None,
+                device="cpu",
             ),
             requires_grad=False,
         )
@@ -516,7 +537,7 @@ class XPUFp8MoEMethod(Fp8OnlineMoEMethod):
                 hidden_size,
                 intermediate_size_per_partition,
                 dtype=params_dtype,
-                device="cpu" if envs.VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT else None,
+                device="cpu",
             ),
             requires_grad=False,
         )
