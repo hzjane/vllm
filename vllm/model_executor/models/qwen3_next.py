@@ -95,6 +95,7 @@ from .interfaces import (
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
 )
@@ -1576,6 +1577,7 @@ class Qwen3NextForCausalLM(
     SupportsPP,
     QwenNextMixtureOfExperts,
     IsHybrid,
+    SupportsEagle3,
 ):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -1624,6 +1626,13 @@ class Qwen3NextForCausalLM(
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def forward(
         self,

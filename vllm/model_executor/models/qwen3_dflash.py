@@ -134,6 +134,15 @@ class DFlashQwen3Attention(nn.Module):
         computes attention for the query tokens only.
         See also: precompute_and_store_context_kv"""
         qkv = F.linear(hidden_states, self.qkv_proj.weight, self.qkv_proj.bias)
+
+        # Debug: Print shapes to diagnose TP issue
+        import os
+        if os.environ.get('VLLM_DEBUG_DFLASH'):
+            logger.info(f"[DFlashDebug {self.layer_name}] hidden_states.shape={hidden_states.shape}, "
+                       f"qkv_proj.weight.shape={self.qkv_proj.weight.shape}, "
+                       f"qkv.shape={qkv.shape}, q_size={self.q_size}, kv_size={self.kv_size}, "
+                       f"num_heads={self.num_heads}, num_kv_heads={self.num_kv_heads}, head_dim={self.head_dim}")
+
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         # Per-head RMSNorm
