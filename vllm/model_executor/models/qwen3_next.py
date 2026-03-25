@@ -6,6 +6,9 @@ from collections.abc import Iterable
 from itertools import islice
 
 import torch
+from custom_esimd_kernels_vllm import esimd_gemv_fp8_pert_fused2
+from custom_esimd_kernels_vllm import esimd_qkv_split_norm_rope
+from custom_esimd_kernels_vllm import esimd_gdn_conv_fused
 from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
@@ -602,6 +605,12 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+        self.conv_bias_zeros = torch.zeros(
+            self.conv_dim // self.tp_size,
+            dtype=torch.float16,
+            device=current_platform.current_device(),
+        )
+        
 
     def create_qkvz_proj(
         self,
@@ -785,12 +794,33 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         3. Output projection
         """
         num_tokens = hidden_states.size(0)
-
+        is_decode = (num_tokens == 1)
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        if is_decode:
+            projected_states_qkvz = torch.empty(
+                (1, self.in_proj_qkvz.weight.shape[0]),
+                dtype=torch.float16,
+                device=hidden_states.device,
+            )
+            projected_states_ba = torch.empty(
+                (1, self.in_proj_ba.weight.shape[0]),
+                dtype=torch.float16,
+                device=hidden_states.device,
+            )
+            esimd_gemv_fp8_pert_fused2(
+                hidden_states,
+                self.in_proj_qkvz.weight,
+                self.in_proj_qkvz.weight_scale,
+                projected_states_qkvz,
+                self.in_proj_ba.weight,
+                self.in_proj_ba.weight_scale,
+                projected_states_ba,
+            )
+        else:
+            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            projected_states_ba, _ = self.in_proj_ba(hidden_states)
 
         # ============================================================
         # Part 2: Core Attention
@@ -807,41 +837,98 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             attn_metadata = attn_metadata[self.prefix]
 
             # TODO: xpu does not support this param yet
-            spec_sequence_masks = attn_metadata.spec_sequence_masks
-            assert spec_sequence_masks is None
+            # spec_sequence_masks = attn_metadata.spec_sequence_masks
+            # assert spec_sequence_masks is None
 
-            conv_weights = self.conv1d.weight.view(
-                self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-            )
+            # conv_weights = self.conv1d.weight.view(
+            #     self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+            # )
 
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
             conv_state = self_kv_cache[0]
             ssm_state = self_kv_cache[1]
 
-            torch.ops._xpu_C.gdn_attention(
-                core_attn_out,
-                z,
-                projected_states_qkvz,
-                projected_states_ba,
-                self.num_k_heads,
-                self.num_v_heads,
-                self.head_k_dim,
-                self.head_v_dim,
-                conv_state=conv_state,
-                ssm_state=ssm_state,
-                conv_weights=conv_weights,
-                conv_bias=self.conv1d.bias,
-                activation=self.activation,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                num_prefills=attn_metadata.num_prefills,
-                num_decodes=attn_metadata.num_decodes,
-                has_initial_state=attn_metadata.has_initial_state,
-                non_spec_query_start_loc=attn_metadata.non_spec_query_start_loc,
-                non_spec_state_indices_tensor=attn_metadata.non_spec_state_indices_tensor,
-                num_actual_tokens=attn_metadata.num_actual_tokens,
-                tp_size=self.tp_size,
+            # torch.ops._xpu_C.gdn_attention(
+            #     core_attn_out,
+            #     z,
+            #     projected_states_qkvz,
+            #     projected_states_ba,
+            #     self.num_k_heads,
+            #     self.num_v_heads,
+            #     self.head_k_dim,
+            #     self.head_v_dim,
+            #     conv_state=conv_state,
+            #     ssm_state=ssm_state,
+            #     conv_weights=conv_weights,
+            #     conv_bias=self.conv1d.bias,
+            #     activation=self.activation,
+            #     A_log=self.A_log,
+            #     dt_bias=self.dt_bias,
+            #     num_prefills=attn_metadata.num_prefills,
+            #     num_decodes=attn_metadata.num_decodes,
+            #     has_initial_state=attn_metadata.has_initial_state,
+            #     non_spec_query_start_loc=attn_metadata.non_spec_query_start_loc,
+            #     non_spec_state_indices_tensor=attn_metadata.non_spec_state_indices_tensor,
+            #     num_actual_tokens=attn_metadata.num_actual_tokens,
+            #     tp_size=self.tp_size,
+            # )
+            conv_weights = self.conv1d.weight.view(
+                self.conv1d.weight.size(0), self.conv1d.weight.size(2)
             )
+            if is_decode:
+                # Decode: fused ESIMD kernel
+                N_dec = attn_metadata.num_decodes
+                state_idx = attn_metadata.non_spec_state_indices_tensor[:N_dec]
+
+                esimd_gdn_conv_fused(
+                    projected_states_qkvz,
+                    conv_state,
+                    conv_weights,
+                    self.conv_bias_zeros,
+                    state_idx,
+                    self.A_log,
+                    self.dt_bias,
+                    projected_states_ba,
+                    ssm_state,
+                    state_idx,
+                    core_attn_out,
+                    z,
+                    N_dec,
+                    self.num_k_heads // self.tp_size,
+                    self.num_v_heads // self.tp_size,
+                    self.head_k_dim,
+                    self.head_v_dim,
+                    float(self.head_k_dim ** -0.5),
+                )
+            else:
+                # Prefill: XPU C++ kernel
+                spec_sequence_masks = attn_metadata.spec_sequence_masks
+                assert spec_sequence_masks is None
+
+                torch.ops._xpu_C.gdn_attention(
+                    core_attn_out,
+                    z,
+                    projected_states_qkvz,
+                    projected_states_ba,
+                    self.num_k_heads,
+                    self.num_v_heads,
+                    self.head_k_dim,
+                    self.head_v_dim,
+                    conv_state=conv_state,
+                    ssm_state=ssm_state,
+                    conv_weights=conv_weights,
+                    conv_bias=self.conv1d.bias,
+                    activation=self.activation,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    num_prefills=attn_metadata.num_prefills,
+                    num_decodes=attn_metadata.num_decodes,
+                    has_initial_state=attn_metadata.has_initial_state,
+                    non_spec_query_start_loc=attn_metadata.non_spec_query_start_loc,
+                    non_spec_state_indices_tensor=attn_metadata.non_spec_state_indices_tensor,
+                    num_actual_tokens=attn_metadata.num_actual_tokens,
+                    tp_size=self.tp_size,
+                )
 
         # ============================================================
         # Part 3: Output Projection
@@ -1306,31 +1393,76 @@ class Qwen3NextAttention(nn.Module):
     ):
         qkv, _ = self.qkv_proj(hidden_states)
 
-        if self.attn_output_gate:
-            q_gate, k, v = qkv.split(
-                [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
+        # if self.attn_output_gate:
+        #     q_gate, k, v = qkv.split(
+        #         [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
+        if hidden_states.shape[0] == 1:
+            q = torch.empty(
+                (1, self.q_size), dtype=torch.float16,
+                device=hidden_states.device,
             )
-            orig_shape = q_gate.shape[:-1]
-            q_gate = q_gate.view(*orig_shape, self.num_heads, -1)
-            q, gate = torch.chunk(q_gate, 2, dim=-1)
-            q = q.reshape(*orig_shape, -1)
-            gate = gate.reshape(*orig_shape, -1)
+            gate = torch.empty(
+                (1, self.q_size), dtype=torch.float16,
+                device=hidden_states.device,
+            )
+            k = torch.empty(
+                (1, self.kv_size), dtype=torch.float16,
+                device=hidden_states.device,
+            )
+            v = torch.empty(
+                (1, self.kv_size), dtype=torch.float16,
+                device=hidden_states.device,
+            )
+            esimd_qkv_split_norm_rope(
+                qkv,
+                q, gate, k, v,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                positions.to(torch.int32),
+                self.num_heads,
+                self.num_kv_heads,
+                self.attn_output_gate,
+            )
+            # orig_shape = q_gate.shape[:-1]
+            # q_gate = q_gate.view(*orig_shape, self.num_heads, -1)
+            # q, gate = torch.chunk(q_gate, 2, dim=-1)
+            # q = q.reshape(*orig_shape, -1)
+            # gate = gate.reshape(*orig_shape, -1)
         else:
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            # q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            if self.attn_output_gate:
+                q_gate, k, v = qkv.split(
+                    [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
+                )
+                orig_shape = q_gate.shape[:-1]
+                q_gate = q_gate.view(*orig_shape, self.num_heads, -1)
+                q, gate = torch.chunk(q_gate, 2, dim=-1)
+                q = q.reshape(*orig_shape, -1)
+                gate = gate.reshape(*orig_shape, -1)
+            else:
+                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(
-            -1, self.num_heads * self.head_dim
-        )
-        k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(
-            -1, self.num_kv_heads * self.head_dim
-        )
+        # q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(
+        #     -1, self.num_heads * self.head_dim
+        # )
+        # k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(
+        #     -1, self.num_kv_heads * self.head_dim
+        # )
+            q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(
+                -1, self.num_heads * self.head_dim
+            )
+            k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(
+                -1, self.num_kv_heads * self.head_dim
+            )
 
-        q, k = self.rotary_emb(positions, q, k)
+            q, k = self.rotary_emb(positions, q, k)
 
         attn_output = self.attn(q, k, v)
 
         if self.attn_output_gate:
-            gate = torch.sigmoid(gate)
+            # gate = torch.sigmoid(gate)
+            if hidden_states.shape[0] != 1:
+                gate = torch.sigmoid(gate)
             attn_output = attn_output * gate
 
         output[:], _ = self.o_proj(attn_output)
