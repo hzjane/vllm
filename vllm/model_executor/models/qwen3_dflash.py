@@ -5,11 +5,10 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn.functional as F
-from flashinfer import rmsnorm
-from flashinfer.rope import apply_rope_with_cos_sin_cache
 from torch import nn
 from transformers import Qwen3Config
 
+from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -64,7 +63,7 @@ class DFlashQwen3Attention(nn.Module):
         max_position: int = 4096 * 32,
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-06,
-        qkv_bias: bool = False,
+        attention_bias: bool = False,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -93,14 +92,14 @@ class DFlashQwen3Attention(nn.Module):
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=qkv_bias,
+            bias=attention_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
-            bias=False,
+            bias=attention_bias,  # DFlash has o_proj bias when using attention bias
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
@@ -109,7 +108,6 @@ class DFlashQwen3Attention(nn.Module):
             self.head_dim,
             max_position=max_position,
             rope_parameters=rope_parameters,
-            dtype=torch.float32,  # required for flashinfer rope
         )
         self.attn = Attention(
             self.num_heads,
@@ -182,7 +180,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
             rms_norm_eps=config.rms_norm_eps,
-            qkv_bias=getattr(config, "attention_bias", False),
+            attention_bias=getattr(config, "attention_bias", False),
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
@@ -319,7 +317,6 @@ class DFlashQwen3Model(nn.Module):
             self._fused_kv_bias = None
 
         # K-norm weights: list of [head_dim] tensors, one per layer.
-        # Used with flashinfer rmsnorm (one fused kernel per layer).
         self._k_norm_weights = [a.k_norm.weight.data for a in layers_attn]
 
         # RoPE parameters
@@ -363,7 +360,7 @@ class DFlashQwen3Model(nn.Module):
         Since the context shape is different than the query shape, we can't rely on the
         regular forward pass to apply torch.compile and CUDA graphs to this section.
         As such, this function is optimized to minimize the number of torch ops present:
-        we use fused flashinfer kernels for RMSNorm and RoPE, fuse the GEMM into one
+        we use fused vLLM kernels for RMSNorm and RoPE, fuse the GEMM into one
         large projection, and avoid cloning buffers (with .contiguous()) where possible.
 
         When context_slot_mapping is None (e.g. during dummy_run) only
@@ -376,10 +373,12 @@ class DFlashQwen3Model(nn.Module):
         nkv = self._num_kv_heads
 
         # --- Fused KV projection (one GEMM for all layers) ---
-        normed_context_states = rmsnorm(
-            input=context_states,
-            weight=self._hidden_norm_weight,
-            eps=self._rms_norm_eps,
+        normed_context_states = torch.empty_like(context_states)
+        ops.rms_norm(
+            normed_context_states,
+            context_states,
+            self._hidden_norm_weight,
+            self._rms_norm_eps,
         )
         all_kv_flat = F.linear(
             normed_context_states, self._fused_kv_weight, self._fused_kv_bias
@@ -396,28 +395,28 @@ class DFlashQwen3Model(nn.Module):
         # --- Per-layer RMSNorm K (3D: [num_ctx, nkv, hd] per layer) ---
         all_k_normed = torch.empty_like(all_k)
         for i in range(L):
-            rmsnorm(
-                input=all_k[i],
-                weight=self._k_norm_weights[i],
-                eps=self._rms_norm_eps,
-                out=all_k_normed[i],
+            ops.rms_norm(
+                all_k_normed[i],
+                all_k[i],
+                self._k_norm_weights[i],
+                self._rms_norm_eps,
             )
 
         # --- Fused RoPE across all layers ---
         # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
-        # We pass all_k_normed as both query and key; the non-inplace version
-        # allocates separate outputs so both read from the unmodified input.
+        # In-place RoPE: pass K as the "query" arg with key=None.
         all_k_flat = all_k_normed.view(L * num_ctx, kv)
         positions_repeated = context_positions.repeat(L)
-        # In-place RoPE cannot be called here, since we use K for both query and key.
-        # Instead we just call the fused kernel and ignore the query output.
-        _, all_k_flat = apply_rope_with_cos_sin_cache(
-            positions=positions_repeated,
-            query=all_k_flat,
-            key=all_k_flat,
-            head_size=self._rope_head_size,
-            cos_sin_cache=self._rope_cos_sin_cache,
-            is_neox=self._rope_is_neox,
+        cos_sin_cache = self._rope_cos_sin_cache
+        if cos_sin_cache.dtype != all_k_flat.dtype:
+            cos_sin_cache = cos_sin_cache.to(dtype=all_k_flat.dtype)
+        ops.rotary_embedding(
+            positions_repeated,
+            all_k_flat,
+            None,
+            self._rope_head_size,
+            cos_sin_cache,
+            self._rope_is_neox,
         )
 
         if context_slot_mapping is None:
@@ -427,9 +426,7 @@ class DFlashQwen3Model(nn.Module):
         all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
         for i in range(L):
             attn = self._attn_layers[i]
-            # TODO(ben): generalize to PP compatibility if needed
-            # assumes virtual_engine=0 for now
-            kv_cache = attn.kv_cache[0]
+            kv_cache = attn.kv_cache
             attn.impl.do_kv_cache_update(
                 attn,
                 all_k_final[i],
