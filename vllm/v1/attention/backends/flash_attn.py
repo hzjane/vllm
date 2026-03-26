@@ -100,6 +100,10 @@ class FlashAttentionBackend(AttentionBackend):
         return "FLASH_ATTN"
 
     @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """FlashAttention supports all attention types."""
         return attn_type in (

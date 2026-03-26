@@ -90,9 +90,11 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from .interfaces import (
+    EagleModelMixin,
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
     EagleModelMixin,
@@ -1657,8 +1659,6 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             self.norm = Qwen3NextRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-
-        self.aux_hidden_state_layers: tuple[int, ...] = ()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
