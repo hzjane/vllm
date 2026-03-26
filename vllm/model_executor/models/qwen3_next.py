@@ -95,6 +95,8 @@ from .interfaces import (
     MixtureOfExperts,
     SupportsLoRA,
     SupportsPP,
+    EagleModelMixin,
+    SupportsEagle3,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -732,7 +734,20 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         3. Output projection
         """
 
+        # XPU fused kernels do not support spec_sequence_masks,
+        # so fall back to the generic Triton path during spec
+        # decode verification.
+        _use_xpu_path = False
         if current_platform.is_xpu():
+            _use_xpu_path = True
+            forward_context = get_forward_context()
+            attn_metadata: AttentionMetadata = forward_context.attn_metadata
+            if attn_metadata is not None:
+                layer_metadata = attn_metadata[self.prefix]
+                if layer_metadata.spec_sequence_masks is not None:
+                    _use_xpu_path = False
+
+        if _use_xpu_path:
             self.forward_xpu(hidden_states, output)
 
         else:
@@ -1442,12 +1457,6 @@ class Qwen3NextAttention(nn.Module):
             else:
                 q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        # q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(
-        #     -1, self.num_heads * self.head_dim
-        # )
-        # k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(
-        #     -1, self.num_kv_heads * self.head_dim
-        # )
             q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(
                 -1, self.num_heads * self.head_dim
             )
@@ -1611,7 +1620,7 @@ class Qwen3NextDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class Qwen3NextModel(nn.Module):
+class Qwen3NextModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -1672,19 +1681,20 @@ class Qwen3NextModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = []
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [], self.start_layer, hidden_states, residual
+        )
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            if layer_idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(
-                    hidden_states + residual if residual is not None else hidden_states
-                )
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
+            )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
             )
 
         if not get_pp_group().is_last_rank:
@@ -1852,6 +1862,7 @@ class Qwen3NextForCausalLM(
     SupportsPP,
     QwenNextMixtureOfExperts,
     IsHybrid,
+    SupportsEagle3,
 ):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -1900,6 +1911,13 @@ class Qwen3NextForCausalLM(
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def forward(
         self,
