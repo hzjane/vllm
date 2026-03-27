@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.platforms import current_platform
 from vllm.config import VllmConfig, replace
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
