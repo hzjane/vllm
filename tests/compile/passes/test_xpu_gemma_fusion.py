@@ -172,3 +172,123 @@ def test_native_routing_requires_exact_gemma_semantics(kind):
     runner = SimpleNamespace(router=router)
     result = xpu_ops._xpu_gemma_routing_owner(runner)
     assert (result is owner) if kind == "gemma" else result is None
+
+
+@pytest.mark.parametrize("matrix", [None, "w13", "w2"])
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="XPU required")
+def test_offset_expert_weight_retains_unfused_graph(monkeypatch, matrix):
+    from types import SimpleNamespace as NS
+
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsFp8
+    from vllm.model_executor.models.gemma4 import Gemma4Router
+
+    def weight(shape, offset):
+        n = 1
+        for d in shape:
+            n *= d
+        storage = torch.empty(n + 64, device="xpu:0", dtype=torch.float8_e4m3fn)
+        return storage[offset : offset + n].view(shape)
+
+    w13 = weight((128, 2816, 704), int(matrix == "w13"))
+    w2 = weight((128, 352, 2816), int(matrix == "w2"))
+    experts = XPUExpertsFp8.__new__(XPUExpertsFp8)
+    experts.quant_config = NS(
+        w1_scale=torch.ones(128, device="xpu:0"),
+        w2_scale=torch.ones(128, device="xpu:0"),
+    )
+    experts.gemm1_clamp_limit = None
+    owner = Gemma4Router.__new__(Gemma4Router)
+    torch.nn.Module.__init__(owner)
+    owner.per_expert_scale = torch.nn.Parameter(torch.ones(128, device="xpu:0"))
+    routed = NS(
+        w13_weight=w13,
+        w2_weight=w2,
+        apply_router_weight_on_input=False,
+        quant_method=NS(
+            moe_kernel=NS(fused_experts=experts), topk_indices_dtype=torch.int32
+        ),
+    )
+    parallel = NS(
+        use_ep=False,
+        ep_size=1,
+        enable_eplb=False,
+        dp_size=1,
+        pcp_size=1,
+        is_sequence_parallel=False,
+    )
+    runner = NS(
+        routed_experts=routed,
+        activation=MoEActivation.GELU_TANH,
+        shared_experts=None,
+        routed_scaling_factor=1.0,
+        expert_map=None,
+        moe_config=NS(
+            has_bias=False,
+            is_lora_enabled=False,
+            moe_parallel_config=parallel,
+            in_dtype=torch.float16,
+            experts_per_token=8,
+        ),
+        router=NS(
+            custom_routing_function=owner.routing_function,
+            top_k=8,
+            global_num_experts=128,
+            eplb_state=None,
+        ),
+    )
+    monkeypatch.setattr(
+        fusion, "get_layers_from_vllm_config", lambda *_: {"layer": runner}
+    )
+    p = fusion.XpuGemmaMoEFusionPass(VllmConfig())
+    g = graph()
+    p(g)
+    g.lint()
+    assert p.matched_count == (1 if matrix is None else 0)
+    assert any(n.target is auto_functionalized for n in g.nodes) == (matrix is not None)
+
+
+@pytest.mark.parametrize("maximum", [4, 8, 16])
+def test_gemma_endpoint_respects_scheduler_upper_bound(maximum):
+    from vllm.config.compilation import CompilationConfig
+    from vllm.config.scheduler import SchedulerConfig
+
+    config = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=1,
+            max_num_batched_tokens=maximum,
+            max_model_len=maximum,
+            is_encoder_decoder=False,
+        ),
+        compilation_config=CompilationConfig(),
+    )
+    config.compilation_config.pass_config.fuse_xpu_gemma_moe = True
+    config._set_compile_ranges()
+    ranges = config.compilation_config.get_compile_ranges()
+    assert ranges[-1].end == maximum
+    assert all(r.end <= maximum for r in ranges)
+    if maximum > 8:
+        assert ranges[0] == Range(1, 8)
+
+
+def test_configured_smaller_limit_restricts_fusion_ranges(gemma_pass):
+    from vllm.config.compilation import CompilationConfig
+    from vllm.config.scheduler import SchedulerConfig
+
+    config = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=1,
+            max_num_batched_tokens=16,
+            max_model_len=16,
+            is_encoder_decoder=False,
+        ),
+        compilation_config=CompilationConfig(),
+    )
+    config.compilation_config.pass_config.fuse_xpu_gemma_moe = True
+    config.compilation_config.pass_config.xpu_gemma_moe_fusion_max_token_num = 4
+    config._set_compile_ranges()
+    p = fusion.XpuGemmaMoEFusionPass(config)
+    ranges = config.compilation_config.get_compile_ranges()
+    assert ranges == [Range(1, 4), Range(5, 16)]
+    assert p.is_applicable_for_range(ranges[0])
+    assert not p.is_applicable_for_range(ranges[1])

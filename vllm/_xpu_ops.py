@@ -1056,6 +1056,8 @@ def xpu_gemma_moe_unsupported_reason(runner) -> str | None:
         or not all(t.is_contiguous() for t in (w13, w2, s13, s2))
         or not all(t.device == w13.device for t in (w2, s13, s2))
         or w13.device.type != "xpu"
+        or w13.data_ptr() % 64 != 0
+        or w2.data_ptr() % 64 != 0
     ):
         return "unsupported per-expert FP8 tensor layout"
     if not supports(
@@ -1066,6 +1068,7 @@ def xpu_gemma_moe_unsupported_reason(runner) -> str | None:
         w2.shape[1],
         w13.shape[0],
         runner.moe_config.experts_per_token,
+        device=w13.device,
     ):
         return "kernel geometry or dtype unsupported"
     owner = _xpu_gemma_routing_owner(runner)

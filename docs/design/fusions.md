@@ -376,6 +376,10 @@ For compile without XPU graph, use:
 
 For compile with XPU graph, set `cudagraph_mode` to
 `FULL_DECODE_ONLY` and add `cudagraph_capture_sizes: [1, 2, 4, 8]`.
-For a smaller fusion limit, include its endpoint in the compile ranges.
+For a smaller fusion limit, set
+`pass_config.xpu_gemma_moe_fusion_max_token_num`, for example to `4`.
+The configuration adds this limit as a compile-range endpoint when it is
+below `max_num_batched_tokens`; adding an endpoint alone does not lower
+the fusion limit.
 The flag is disabled by default. Actual eager execution
 (`--enforce-eager`) does not run the compile pass.
