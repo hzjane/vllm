@@ -342,3 +342,39 @@ q_fp8, q_scale, kv_normed = fused_mla_dual_rms_norm_per_token_quant(
   works.
 - [Attention Backends](attention_backends.md) — attention-specific kernel
   selection.
+
+## XPU Gemma4 routed-expert decode fusion
+
+`pass_config.fuse_xpu_gemma_moe` enables an opt-in compile pass for
+Gemma4-26B-A4B routed experts with per-expert FP8 E4M3 weights and
+FP16/BF16 activations. It requires the companion `vllm-xpu-kernels`
+`gemma_moe_fused_decode_interface` operator. Existing routing (including
+per-expert scales), the dense MLP, normalization and tensor-parallel
+reductions are preserved.
+
+The initial kernel supports local expert geometry H=2816, I=352, 128
+experts and top-k 8. The pass applies only to compile ranges ending at
+`xpu_gemma_moe_fusion_max_token_num` (default 8, supported range 1..8).
+Missing kernels, other geometries, LoRA, expert parallelism/EPLB,
+data/context/sequence parallelism, bias and unsupported quantization
+keep the original graph. Dense Gemma4 models, including 31B, do not use
+this routed-expert pass.
+
+For compile without XPU graph, use:
+
+```json
+{
+  "mode": 3,
+  "backend": "inductor",
+  "splitting_ops": [],
+  "cudagraph_mode": "NONE",
+  "compile_ranges_endpoints": [8],
+  "pass_config": {"fuse_xpu_gemma_moe": true}
+}
+```
+
+For compile with XPU graph, set `cudagraph_mode` to
+`FULL_DECODE_ONLY` and add `cudagraph_capture_sizes: [1, 2, 4, 8]`.
+For a smaller fusion limit, include its endpoint in the compile ranges.
+The flag is disabled by default. Actual eager execution
+(`--enforce-eager`) does not run the compile pass.

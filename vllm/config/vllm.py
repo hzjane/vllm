@@ -2559,6 +2559,11 @@ class VllmConfig:
         if compile_range_end is not None:
             computed_compile_ranges_endpoints.append(compile_range_end)
 
+        if compilation_config.pass_config.fuse_xpu_gemma_moe:
+            computed_compile_ranges_endpoints.append(
+                compilation_config.pass_config.xpu_gemma_moe_fusion_max_token_num
+            )
+
         # Add the compile ranges for flashinfer/aiter.
         if compilation_config.pass_config.fuse_allreduce_rms:
             tp_size = self.parallel_config.tensor_parallel_size

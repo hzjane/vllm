@@ -12,7 +12,7 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -981,6 +981,133 @@ def _selective_scan_fwd_kernel(
 _OPS_REGISTERED = False
 
 
+_XPU_GEMMA_MOE_PLAN_ATTR = "_xpu_gemma_moe_fused_plan"
+
+
+def xpu_gemma_moe_fused_available() -> bool:
+    try:
+        from vllm_xpu_kernels.gemma_moe_fused_interface import is_available
+    except ImportError:
+        return False
+    return is_available()
+
+
+def xpu_gemma_moe_unsupported_reason(runner) -> str | None:
+    """Read config/weight metadata without routing or kernel submission."""
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsFp8
+
+    if not xpu_gemma_moe_fused_available():
+        return "companion Gemma expert op unavailable"
+    from vllm_xpu_kernels.gemma_moe_fused_interface import supports
+
+    routed = runner.routed_experts
+    kernel = routed.quant_method.moe_kernel
+    experts = kernel.fused_experts if kernel is not None else None
+    parallel = runner.moe_config.moe_parallel_config
+    if (
+        not isinstance(experts, XPUExpertsFp8)
+        or runner.activation != MoEActivation.GELU_TANH
+        or runner.shared_experts is not None
+        or runner.routed_scaling_factor != 1.0
+        or routed.apply_router_weight_on_input
+        or runner.moe_config.has_bias
+        or runner.moe_config.is_lora_enabled
+        or parallel.use_ep
+        or parallel.ep_size != 1
+        or parallel.enable_eplb
+        or parallel.dp_size != 1
+        or parallel.pcp_size != 1
+        or parallel.is_sequence_parallel
+        or runner.expert_map is not None
+        or experts.gemm1_clamp_limit is not None
+    ):
+        return "unsupported expert activation, parallelism, bias or quantization"
+    w13, w2 = routed.w13_weight, routed.w2_weight
+    s13, s2 = experts.w1_scale, experts.w2_scale
+    if (
+        w13.ndim != 3
+        or w2.ndim != 3
+        or s13 is None
+        or s2 is None
+        or w2.shape != (128, 352, 2816)
+        or w13.shape != (128, 2816, 704)
+        or w2.dtype != torch.float8_e4m3fn
+        or s13.shape != (128,)
+        or s2.shape != (128,)
+        or s13.dtype != torch.float32
+        or s2.dtype != torch.float32
+        or not all(t.is_contiguous() for t in (w13, w2, s13, s2))
+        or not all(t.device == w13.device for t in (w2, s13, s2))
+        or w13.device.type != "xpu"
+    ):
+        return "unsupported per-expert FP8 tensor layout"
+    if not supports(
+        runner.moe_config.in_dtype,
+        w13.dtype,
+        1,
+        w13.shape[1],
+        w2.shape[1],
+        w13.shape[0],
+        runner.moe_config.experts_per_token,
+    ):
+        return "kernel geometry or dtype unsupported"
+    return None
+
+
+def _xpu_gemma_moe_fused_plan(runner):
+    from vllm_xpu_kernels.gemma_moe_fused_interface import XpuGemmaMoEFusedDecode
+
+    routed = runner.routed_experts
+    kernel = routed.quant_method.moe_kernel
+    if kernel is None:
+        raise RuntimeError("Gemma expert kernel is not initialized")
+    experts = kernel.fused_experts
+    tensors = (routed.w13_weight, experts.w1_scale, routed.w2_weight, experts.w2_scale)
+    plan = getattr(runner, _XPU_GEMMA_MOE_PLAN_ATTR, None)
+    if plan is not None and all(
+        a is b for a, b in zip((plan.w13, plan.s13, plan.w2, plan.s2), tensors)
+    ):
+        return plan
+    reason = xpu_gemma_moe_unsupported_reason(runner)
+    if reason is not None:
+        raise RuntimeError(f"Gemma expert fusion cannot run: {reason}")
+    plan = XpuGemmaMoEFusedDecode(*tensors)
+    setattr(runner, _XPU_GEMMA_MOE_PLAN_ATTR, plan)
+    return plan
+
+
+def _xpu_gemma_moe_fused_impl(
+    hidden_states: torch.Tensor, router_logits: torch.Tensor, layer_name: LayerNameType
+) -> torch.Tensor:
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+        _resolve_layer_name,
+        get_layer_from_name,
+    )
+
+    runner = get_layer_from_name(_resolve_layer_name(layer_name))
+    plan = _xpu_gemma_moe_fused_plan(runner)
+    # Preserve main's Gemma routing, per-expert scale and capture callback.
+    weights, ids = runner.router.select_experts(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+        topk_indices_dtype=runner.routed_experts.quant_method.topk_indices_dtype,
+        input_ids=None,
+    )
+    return plan.forward(
+        torch.empty_like(hidden_states),
+        hidden_states,
+        weights.contiguous(),
+        ids.contiguous(),
+    )
+
+
+def _xpu_gemma_moe_fused_fake(
+    hidden_states: torch.Tensor, router_logits: torch.Tensor, layer_name: LayerNameType
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
 class xpu_ops:
     @staticmethod
     @torch.compile
@@ -1411,6 +1538,17 @@ class xpu_ops:
                 op_func=_xpu_fused_input_norm_impl,
                 fake_impl=_xpu_fused_input_norm_fake,
             )
+
+            try:
+                gemma_available = xpu_gemma_moe_fused_available()
+            except ImportError:
+                gemma_available = False
+            if gemma_available:
+                direct_register_custom_op(
+                    op_name="xpu_gemma_moe_fused",
+                    op_func=_xpu_gemma_moe_fused_impl,
+                    fake_impl=_xpu_gemma_moe_fused_fake,
+                )
 
             _OPS_REGISTERED = True
 

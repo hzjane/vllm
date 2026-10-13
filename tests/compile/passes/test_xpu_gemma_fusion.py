@@ -1,0 +1,146 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import operator
+
+import pytest
+import torch
+from torch import fx
+from torch._higher_order_ops.auto_functionalize import auto_functionalized
+from torch._subclasses.fake_tensor import FakeTensorMode
+
+import vllm._xpu_ops as xpu_ops
+import vllm.model_executor.layers.fused_moe.runner.moe_runner  # noqa: F401
+from vllm.compilation.passes.fusion import xpu_gemma_fusion as fusion
+from vllm.config import VllmConfig
+from vllm.config.compilation import PassConfig
+from vllm.config.utils import Range
+
+
+@pytest.fixture(scope="module", autouse=True)
+def register_test_op():
+    lib = None
+    if not hasattr(torch.ops.vllm, "xpu_gemma_moe_fused"):
+        lib = torch.library.Library("vllm", "FRAGMENT")
+        lib.define(
+            "xpu_gemma_moe_fused(Tensor hidden_states, Tensor router_logits, "
+            "str layer_name) -> Tensor"
+        )
+    yield
+    del lib
+
+
+@pytest.fixture
+def gemma_pass(monkeypatch):
+    monkeypatch.setattr(
+        fusion, "get_layers_from_vllm_config", lambda *_: {"layer": object()}
+    )
+    monkeypatch.setattr(xpu_ops, "xpu_gemma_moe_unsupported_reason", lambda _: None)
+    return fusion.XpuGemmaMoEFusionPass(VllmConfig())
+
+
+def graph(
+    dtype=torch.float16,
+    hidden=2816,
+    other_output=False,
+    shared=False,
+    padded=False,
+    strided=False,
+):
+    g = fx.Graph()
+    x, logits = g.placeholder("hidden"), g.placeholder("logits")
+    with FakeTensorMode():
+        xv = torch.empty(
+            2, hidden * 2 if strided else hidden, dtype=dtype, device="xpu"
+        )
+        if strided:
+            xv = xv[:, ::2]
+        lv = torch.empty(2, 128, dtype=torch.float32, device="xpu")
+    x.meta["val"], logits.meta["val"] = xv, lv
+    node = g.call_function(
+        auto_functionalized,
+        (torch.ops.vllm.moe_forward.default,),
+        {
+            "hidden_states": x,
+            "router_logits": logits,
+            "layer_name": "layer",
+            "shared_experts_input": x if shared else None,
+            "input_ids": None,
+            "hidden_dim_unpadded": hidden if padded else 0,
+        },
+    )
+    y = g.call_function(operator.getitem, (node, 0))
+    y.meta["val"] = xv
+    if other_output:
+        modified = g.call_function(operator.getitem, (node, 1))
+        g.output((y, modified))
+    else:
+        g.output((y,))
+    return g
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_rewrites_routed_output_without_changing_callers(gemma_pass, dtype):
+    g = graph(dtype)
+    gemma_pass(g)
+    g.lint()
+    assert gemma_pass.matched_count == 1
+    targets = [n.target for n in g.nodes]
+    assert torch.ops.vllm.xpu_gemma_moe_fused.default in targets
+    assert auto_functionalized not in targets
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"dtype": torch.float32},
+        {"hidden": 5376},
+        {"other_output": True},
+        {"shared": True},
+        {"padded": True},
+        {"strided": True},
+    ],
+)
+def test_unsupported_graph_retains_original_moe(gemma_pass, kwargs):
+    g = graph(**kwargs)
+    gemma_pass(g)
+    assert gemma_pass.matched_count == 0
+    assert any(n.target is auto_functionalized for n in g.nodes)
+
+
+def test_prefill_ranges_skip_expert_fusion(gemma_pass):
+    assert gemma_pass.is_applicable_for_range(Range(1, 8))
+    assert not gemma_pass.is_applicable_for_range(Range(9, 1024))
+
+
+def test_any_unsupported_layer_keeps_original_graph(monkeypatch):
+    monkeypatch.setattr(
+        fusion, "get_layers_from_vllm_config", lambda *_: {"layer": object()}
+    )
+    monkeypatch.setattr(xpu_ops, "xpu_gemma_moe_unsupported_reason", lambda _: "layout")
+    p = fusion.XpuGemmaMoEFusionPass(VllmConfig())
+    g = graph()
+    p(g)
+    assert p.matched_count == 0
+
+
+@pytest.mark.parametrize("n", [0, 9])
+def test_max_token_range_rejects_unsupported_limit(n):
+    with pytest.raises(ValueError):
+        PassConfig(xpu_gemma_moe_fusion_max_token_num=n)
+
+
+def test_default_off():
+    assert not PassConfig().fuse_xpu_gemma_moe
+
+
+def test_companion_module_missing_disables_availability(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "vllm_xpu_kernels.gemma_moe_fused_interface", None)
+    assert not xpu_ops.xpu_gemma_moe_fused_available()
+
+
+def test_missing_native_reason_returns_before_optional_import(monkeypatch):
+    monkeypatch.setattr(xpu_ops, "xpu_gemma_moe_fused_available", lambda: False)
+    reason = xpu_ops.xpu_gemma_moe_unsupported_reason(object())
+    assert reason is not None and "unavailable" in reason
