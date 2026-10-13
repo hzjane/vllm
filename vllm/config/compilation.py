@@ -837,6 +837,7 @@ class CompilationConfig:
             from vllm._xpu_ops import (
                 _xpu_gemma_moe_fused_impl,
                 _xpu_gemma_moe_fused_plan,
+                _xpu_gemma_routing_owner,
                 xpu_gemma_moe_unsupported_reason,
             )
             from vllm.compilation.passes.fusion.xpu_gemma_fusion import (
@@ -849,6 +850,7 @@ class CompilationConfig:
                 _xpu_gemma_moe_fused_impl,
                 _xpu_gemma_moe_fused_plan,
                 xpu_gemma_moe_unsupported_reason,
+                _xpu_gemma_routing_owner,
             )
             if native is not None:
                 factors["gemma_moe_interface_source"] = InductorPass.hash_source(
@@ -861,7 +863,7 @@ class CompilationConfig:
             if available:
                 factors["gemma_moe_schema"] = str(
                     torch.ops._xpu_C.gemma_moe_fused_decode_interface.default._schema
-                )
+                ) + str(torch.ops._xpu_C.gemma_moe_topk_interface.default._schema)
 
         factors["dynamic_shapes_config"] = self.dynamic_shapes_config.compute_hash()
         return hash_factors(factors)

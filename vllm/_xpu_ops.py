@@ -992,6 +992,22 @@ def xpu_gemma_moe_fused_available() -> bool:
     return is_available()
 
 
+def _xpu_gemma_routing_owner(runner):
+    from vllm.model_executor.models.gemma4 import Gemma4Router
+
+    fn = getattr(runner.router, "custom_routing_function", None)
+    owner = getattr(fn, "__self__", None)
+    if (
+        not isinstance(owner, Gemma4Router)
+        or getattr(fn, "__func__", None) is not Gemma4Router.routing_function
+        or runner.router.top_k != 8
+        or runner.router.global_num_experts != 128
+        or runner.router.eplb_state is not None
+    ):
+        return None
+    return owner
+
+
 def xpu_gemma_moe_unsupported_reason(runner) -> str | None:
     """Read config/weight metadata without routing or kernel submission."""
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -1052,6 +1068,18 @@ def xpu_gemma_moe_unsupported_reason(runner) -> str | None:
         runner.moe_config.experts_per_token,
     ):
         return "kernel geometry or dtype unsupported"
+    owner = _xpu_gemma_routing_owner(runner)
+    if owner is None:
+        return "unsupported Gemma routing function"
+    scale = owner.per_expert_scale
+    if (
+        scale.shape != (128,)
+        or scale.device != w13.device
+        or not scale.is_contiguous()
+        or scale.dtype not in (torch.float16, torch.bfloat16, torch.float32)
+        or routed.quant_method.topk_indices_dtype not in (None, torch.int32)
+    ):
+        return "unsupported Gemma routing scale or indices dtype"
     return None
 
 
@@ -1087,13 +1115,12 @@ def _xpu_gemma_moe_fused_impl(
 
     runner = get_layer_from_name(_resolve_layer_name(layer_name))
     plan = _xpu_gemma_moe_fused_plan(runner)
-    # Preserve main's Gemma routing, per-expert scale and capture callback.
-    weights, ids = runner.router.select_experts(
-        hidden_states=hidden_states,
-        router_logits=router_logits,
-        topk_indices_dtype=runner.routed_experts.quant_method.topk_indices_dtype,
-        input_ids=None,
-    )
+    owner = _xpu_gemma_routing_owner(runner)
+    if owner is None:
+        raise RuntimeError("Gemma expert fusion requires the supported router")
+    weights, ids = plan.route(router_logits.contiguous(), owner.per_expert_scale)
+    if runner.router.capture_fn is not None:
+        runner.router.capture_fn(ids)
     return plan.forward(
         torch.empty_like(hidden_states),
         hidden_states,

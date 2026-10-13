@@ -19,7 +19,7 @@ logger = init_logger(__name__)
 
 
 class XpuGemmaMoEFusionPass(VllmInductorPass):
-    """Replace routed experts while retaining router, dense branch and norms."""
+    """Fuse Gemma routing and routed experts; retain dense branch and norms."""
 
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)

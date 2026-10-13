@@ -144,3 +144,31 @@ def test_missing_native_reason_returns_before_optional_import(monkeypatch):
     monkeypatch.setattr(xpu_ops, "xpu_gemma_moe_fused_available", lambda: False)
     reason = xpu_ops.xpu_gemma_moe_unsupported_reason(object())
     assert reason is not None and "unavailable" in reason
+
+
+@pytest.mark.parametrize("kind", ["gemma", "other", "override", "eplb"])
+def test_native_routing_requires_exact_gemma_semantics(kind):
+    from types import SimpleNamespace
+
+    from vllm.model_executor.models.gemma4 import Gemma4Router
+
+    owner = Gemma4Router.__new__(Gemma4Router)
+    torch.nn.Module.__init__(owner)
+    fn = owner.routing_function
+    if kind == "other":
+        fn = lambda **kwargs: None
+    if kind == "override":
+
+        def replacement(self, **kwargs):
+            return None
+
+        fn = replacement.__get__(owner, Gemma4Router)
+    router = SimpleNamespace(
+        custom_routing_function=fn,
+        top_k=8,
+        global_num_experts=128,
+        eplb_state=object() if kind == "eplb" else None,
+    )
+    runner = SimpleNamespace(router=router)
+    result = xpu_ops._xpu_gemma_routing_owner(runner)
+    assert (result is owner) if kind == "gemma" else result is None
