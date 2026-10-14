@@ -140,6 +140,11 @@ class PassConfig:
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
     """Enable fused MLA KV cache update with RoPE."""
 
+    fuse_xpu_gemma_moe: bool = False
+    """Fuse supported Gemma4 routed FP8 GELU experts for XPU decode."""
+    xpu_gemma_moe_fusion_max_token_num: int = Field(default=8, ge=1, le=8)
+    """Largest decode compile-range endpoint eligible for Gemma expert fusion."""
+
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
     """Fuse the custom RMSNorm + padding ops."""
@@ -291,6 +296,9 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_qk_norm_rope_kvcache = False
+        if self.fuse_xpu_gemma_moe and not current_platform.is_xpu():
+            logger.warning_once("Gemma XPU expert fusion disabled on non-XPU platform.")
+            self.fuse_xpu_gemma_moe = False
         if self.fuse_rope_kvcache_cat_mla and not current_platform.is_cuda_alike():
             logger.warning_once(
                 "MLA KV cache update with RoPE fusion enabled but the "
@@ -818,6 +826,45 @@ class CompilationConfig:
         factors = get_hash_factors(self, ignored_factors)
 
         factors["pass_config"] = self.pass_config.compute_hash()
+        if self.pass_config.fuse_xpu_gemma_moe:
+            import torch
+
+            try:
+                from vllm_xpu_kernels import gemma_moe_fused_interface as native
+            except ImportError:
+                native = None
+
+            from vllm._xpu_ops import (
+                _xpu_gemma_moe_fused_impl,
+                _xpu_gemma_moe_fused_plan,
+                _xpu_gemma_routing_owner,
+                xpu_gemma_moe_unsupported_reason,
+            )
+            from vllm.compilation.passes.fusion.xpu_gemma_fusion import (
+                XpuGemmaMoEFusionPass,
+            )
+            from vllm.compilation.passes.inductor_pass import InductorPass
+
+            factors["gemma_moe_source"] = InductorPass.hash_source(
+                XpuGemmaMoEFusionPass,
+                _xpu_gemma_moe_fused_impl,
+                _xpu_gemma_moe_fused_plan,
+                xpu_gemma_moe_unsupported_reason,
+                _xpu_gemma_routing_owner,
+            )
+            if native is not None:
+                factors["gemma_moe_interface_source"] = InductorPass.hash_source(
+                    native.XpuGemmaMoEFusedDecode,
+                    native.supports,
+                    native.workspace_bytes,
+                )
+            available = native is not None and native.is_available()
+            factors["gemma_moe_native_available"] = available
+            if available:
+                factors["gemma_moe_schema"] = str(
+                    torch.ops._xpu_C.gemma_moe_fused_decode_interface.default._schema
+                ) + str(torch.ops._xpu_C.gemma_moe_topk_interface.default._schema)
+
         factors["dynamic_shapes_config"] = self.dynamic_shapes_config.compute_hash()
         return hash_factors(factors)
 

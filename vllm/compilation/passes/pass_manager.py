@@ -217,6 +217,11 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [QKNormRoPEFusionPass(config)]
 
+            if current_platform.is_xpu() and self.pass_config.fuse_xpu_gemma_moe:
+                from .fusion.xpu_gemma_fusion import XpuGemmaMoEFusionPass
+
+                self.passes += [XpuGemmaMoEFusionPass(config)]
+
             self.ir_lowering = VllmIRLoweringPass(config)
             self.clone_elimination = UnsafeCloneEliminationPass(config)
             self.post_cleanup = PostCleanupPass(config)
