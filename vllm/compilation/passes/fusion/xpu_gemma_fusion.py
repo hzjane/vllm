@@ -28,7 +28,10 @@ class XpuGemmaMoEFusionPass(VllmInductorPass):
         self.max_tokens = (
             config.compilation_config.pass_config.xpu_gemma_moe_fusion_max_token_num
         )
-        self.enabled = hasattr(torch.ops.vllm, "xpu_gemma_moe_fused")
+        self.enabled = (
+            hasattr(torch.ops.vllm, "xpu_gemma_moe_fused")
+            and not config.parallel_config.use_ubatching
+        )
         self.matched_count = 0
         if not self.enabled:
             return

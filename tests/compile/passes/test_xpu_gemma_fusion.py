@@ -292,3 +292,23 @@ def test_configured_smaller_limit_restricts_fusion_ranges(gemma_pass):
     assert ranges == [Range(1, 4), Range(5, 16)]
     assert p.is_applicable_for_range(ranges[0])
     assert not p.is_applicable_for_range(ranges[1])
+
+
+@pytest.mark.parametrize(
+    "enable_dbo,ubatch_size", [(False, 0), (False, 1), (False, 2), (True, 0)]
+)
+def test_microbatching_keeps_original_gemma_graph(gemma_pass, enable_dbo, ubatch_size):
+    from vllm.config.parallel import ParallelConfig
+
+    config = VllmConfig()
+    config.parallel_config = ParallelConfig(
+        enable_dbo=enable_dbo, ubatch_size=ubatch_size
+    )
+    pass_ = fusion.XpuGemmaMoEFusionPass(config)
+    expected = not config.parallel_config.use_ubatching
+    assert pass_.is_applicable_for_range(Range(1, 8)) == expected
+    g = graph()
+    pass_(g)
+    g.lint()
+    assert pass_.matched_count == (1 if expected else 0)
+    assert any(node.target is auto_functionalized for node in g.nodes) == (not expected)

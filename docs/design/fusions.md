@@ -357,9 +357,9 @@ The initial kernel supports local expert geometry H=2816, I=352, 128
 experts and top-k 8. The pass applies only to compile ranges ending at
 `xpu_gemma_moe_fusion_max_token_num` (default 8, supported range 1..8).
 Missing kernels, other geometries, LoRA, expert parallelism/EPLB,
-data/context/sequence parallelism, bias and unsupported quantization
-keep the original graph. Dense Gemma4 models, including 31B, do not use
-this routed-expert pass.
+data/context/sequence parallelism, microbatching (DBO or a fixed
+`ubatch_size` > 1), bias and unsupported quantization keep the original graph.
+Dense Gemma4 models, including 31B, do not use this routed-expert pass.
 
 For compile without XPU graph, use:
 
